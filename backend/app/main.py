@@ -200,17 +200,25 @@ GRIFFIN_LIM_ITER = _int_env("GRIFFIN_LIM_ITER", _CFG_GRIFFIN_LIM_ITER, minimum=4
 # Residual suppression sharpens the model mask to attenuate low-confidence bins,
 # which reduces faint background speech that survives denoising.
 APPLY_RESIDUAL_SUPPRESS = _bool_env("APPLY_RESIDUAL_SUPPRESS", True)
-RESIDUAL_SUPPRESS_POWER = _float_env("RESIDUAL_SUPPRESS_POWER", 2.0, minimum=1.0, maximum=4.0)
-RESIDUAL_SUPPRESS_FLOOR = _float_env("RESIDUAL_SUPPRESS_FLOOR", 0.08, minimum=0.0, maximum=0.5)
+RESIDUAL_SUPPRESS_POWER = _float_env("RESIDUAL_SUPPRESS_POWER", 2.6, minimum=1.0, maximum=4.0)
+RESIDUAL_SUPPRESS_FLOOR = _float_env("RESIDUAL_SUPPRESS_FLOOR", 0.05, minimum=0.0, maximum=0.5)
 
 # Speech-band suppression specifically targets voice-like residuals that remain
 # after denoising (e.g., faint background conversation leakage).
 APPLY_SPEECH_BAND_SUPPRESS = _bool_env("APPLY_SPEECH_BAND_SUPPRESS", True)
 SPEECH_BAND_MIN_HZ = _float_env("SPEECH_BAND_MIN_HZ", 180.0, minimum=20.0)
 SPEECH_BAND_MAX_HZ = _float_env("SPEECH_BAND_MAX_HZ", 4200.0, minimum=500.0)
-SPEECH_SUPPRESS_THRESHOLD = _float_env("SPEECH_SUPPRESS_THRESHOLD", 0.55, minimum=0.05, maximum=0.95)
-SPEECH_SUPPRESS_STEEPNESS = _float_env("SPEECH_SUPPRESS_STEEPNESS", 10.0, minimum=1.0, maximum=30.0)
-SPEECH_SUPPRESS_FLOOR = _float_env("SPEECH_SUPPRESS_FLOOR", 0.20, minimum=0.0, maximum=0.8)
+SPEECH_SUPPRESS_THRESHOLD = _float_env("SPEECH_SUPPRESS_THRESHOLD", 0.62, minimum=0.05, maximum=0.95)
+SPEECH_SUPPRESS_STEEPNESS = _float_env("SPEECH_SUPPRESS_STEEPNESS", 14.0, minimum=1.0, maximum=30.0)
+SPEECH_SUPPRESS_FLOOR = _float_env("SPEECH_SUPPRESS_FLOOR", 0.12, minimum=0.0, maximum=0.8)
+
+# Frame-level gate in speech band: attenuates whole speech-band frames with
+# low confidence, which is effective against faint background conversations.
+APPLY_FRAME_SPEECH_GATE = _bool_env("APPLY_FRAME_SPEECH_GATE", True)
+FRAME_SPEECH_GATE_THRESHOLD = _float_env("FRAME_SPEECH_GATE_THRESHOLD", 0.60, minimum=0.05, maximum=0.95)
+FRAME_SPEECH_GATE_STEEPNESS = _float_env("FRAME_SPEECH_GATE_STEEPNESS", 16.0, minimum=1.0, maximum=40.0)
+FRAME_SPEECH_GATE_FLOOR = _float_env("FRAME_SPEECH_GATE_FLOOR", 0.10, minimum=0.0, maximum=0.9)
+FRAME_SPEECH_GATE_SMOOTH = _int_env("FRAME_SPEECH_GATE_SMOOTH", 9, minimum=1)
 
 
 def _load_audio_with_fallback(path: Path) -> tuple[torch.Tensor, int]:
@@ -367,6 +375,41 @@ def _apply_speech_band_suppress(mag_clean: torch.Tensor, mag_noisy: torch.Tensor
     return torch.clamp(mag_clean * gain, min=0.0)
 
 
+def _apply_frame_speech_gate(mag_clean: torch.Tensor, mag_noisy: torch.Tensor) -> torch.Tensor:
+    """Suppress whole speech-band frames when confidence stays low over time."""
+    if not APPLY_FRAME_SPEECH_GATE:
+        return torch.clamp(mag_clean, min=0.0)
+
+    eps = 1e-8
+    mask = torch.clamp(mag_clean / (mag_noisy + eps), min=0.0, max=1.0)
+
+    nyquist = SAMPLE_RATE / 2.0
+    min_hz = max(0.0, min(SPEECH_BAND_MIN_HZ, nyquist))
+    max_hz = max(min_hz, min(SPEECH_BAND_MAX_HZ, nyquist))
+    freqs = torch.linspace(0.0, nyquist, mag_clean.size(0), device=mag_clean.device, dtype=mag_clean.dtype).unsqueeze(1)
+    band = ((freqs >= min_hz) & (freqs <= max_hz)).to(mag_clean.dtype)
+
+    band_bins = band.sum().clamp_min(1.0)
+    frame_conf = (mask * band).sum(dim=0, keepdim=True) / band_bins
+
+    kernel = FRAME_SPEECH_GATE_SMOOTH
+    if kernel % 2 == 0:
+        kernel += 1
+    if kernel > 1 and frame_conf.size(1) >= kernel:
+        frame_conf = torch.nn.functional.avg_pool1d(
+            frame_conf.unsqueeze(0),
+            kernel_size=kernel,
+            stride=1,
+            padding=kernel // 2,
+        ).squeeze(0)
+
+    frame_keep = torch.sigmoid((frame_conf - FRAME_SPEECH_GATE_THRESHOLD) * FRAME_SPEECH_GATE_STEEPNESS)
+    frame_keep = FRAME_SPEECH_GATE_FLOOR + (1.0 - FRAME_SPEECH_GATE_FLOOR) * frame_keep
+
+    gain = (1.0 - band) + (band * frame_keep)
+    return torch.clamp(mag_clean * gain, min=0.0)
+
+
 def _estimate_noise_floor(magnitude: torch.Tensor) -> torch.Tensor:
     """Estimate stationary background floor per frequency bin."""
     try:
@@ -491,6 +534,14 @@ def _load_model() -> UNet | None:
         SPEECH_SUPPRESS_FLOOR,
     )
     logger.info(
+        "Frame speech gate: enabled=%s, threshold=%.2f, steepness=%.1f, floor=%.2f, smooth=%d",
+        APPLY_FRAME_SPEECH_GATE,
+        FRAME_SPEECH_GATE_THRESHOLD,
+        FRAME_SPEECH_GATE_STEEPNESS,
+        FRAME_SPEECH_GATE_FLOOR,
+        FRAME_SPEECH_GATE_SMOOTH,
+    )
+    logger.info(
         "Thread settings: torch_threads=%d, torch_interop_threads=%d",
         torch.get_num_threads(),
         torch.get_num_interop_threads() if hasattr(torch, "get_num_interop_threads") else -1,
@@ -543,6 +594,7 @@ async def health():
         "griffin_lim_iter": GRIFFIN_LIM_ITER,
         "apply_residual_suppress": APPLY_RESIDUAL_SUPPRESS,
         "apply_speech_band_suppress": APPLY_SPEECH_BAND_SUPPRESS,
+        "apply_frame_speech_gate": APPLY_FRAME_SPEECH_GATE,
         "torch_threads": torch.get_num_threads(),
         "torch_interop_threads": torch.get_num_interop_threads() if hasattr(torch, "get_num_interop_threads") else None,
         "version": "1.0.0",
@@ -632,6 +684,7 @@ async def denoise(file: UploadFile = File(...)):
         mag_clean = _apply_postfilter(mag_clean)
         mag_clean = _apply_residual_suppress(mag_clean, mag)
         mag_clean = _apply_speech_band_suppress(mag_clean, mag)
+        mag_clean = _apply_frame_speech_gate(mag_clean, mag)
 
         # Phase reconstruction — Griffin-Lim iterates to find a phase consistent
         # with the clean magnitude, eliminating noisy-phase bleed-through.
@@ -648,9 +701,9 @@ async def denoise(file: UploadFile = File(...)):
                 window=window,
             )
 
-        # Normalize to prevent clipping
+        # Normalize only when needed to avoid re-amplifying residual background.
         peak = waveform_clean.abs().max()
-        if peak > 0:
+        if peak > 0.95:
             waveform_clean = waveform_clean / peak * 0.95
 
         # Save output
