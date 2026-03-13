@@ -1,0 +1,32 @@
+# Set default behavior to automatically normalize line endings
+* text=auto
+
+# Python files – always LF in repo
+*.py text eol=lf
+
+# Jupyter notebooks – always LF in repo
+*.ipynb text eol=lf
+
+# Text files (Markdown, TXT, CSV) – always LF
+*.md text eol=lf
+*.txt text eol=lf
+*.csv text eol=lf
+
+# Ignore binary files (audio, images, models)
+*.wav binary
+*.mp3 binary
+*.flac binary
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.h5 binary
+*.pt binary
+
+# Force shell scripts to LF
+*.sh text eol=lf
+
+# Windows batch files – keep CRLF
+
+*.bat text eol=crlf
+
+*.bat text eol=crlf

@@ -1,0 +1,38 @@
+# Core dependencies
+numpy
+scipy
+matplotlib
+torch
+torchaudio
+pandas
+scikit-learn
+
+# Jupyter (for notebooks)
+jupyter
+
+# Frontend (React, TypeScript)
+# These are for reference; install via npm in frontend/
+# react
+# react-dom
+# typescript
+# @types/react
+# @types/react-dom
+
+# Additional utilities
+librosa
+soundfile
+
+# Visualization
+seaborn
+
+# Evaluation Metrics
+pystoi
+
+# If using Flask or FastAPI for backend API, uncomment one:
+# flask
+# fastapi
+
+# If using requests for HTTP calls
+# requests
+
+

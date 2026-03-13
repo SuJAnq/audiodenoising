@@ -1,0 +1,13 @@
+fastapi
+uvicorn[standard]
+python-multipart
+
+torch
+torchaudio
+
+# Fallback decoders if torchaudio requests torchcodec
+soundfile
+librosa
+
+# Optional (recommended when available):
+# torchcodec
