@@ -181,11 +181,16 @@ SPECTRAL_GATE_THRESHOLD = _float_env("SPECTRAL_GATE_THRESHOLD", _CFG_SPECTRAL_GA
 APPLY_WIENER_POSTFILTER = _bool_env("APPLY_WIENER_POSTFILTER", _CFG_APPLY_WIENER_POSTFILTER)
 WIENER_BETA = _float_env("WIENER_BETA", _CFG_WIENER_BETA, minimum=0.0)
 
-# Griffin-Lim phase reconstruction — off by default (uses noisy phase which is fast).
-# Set USE_GRIFFIN_LIM=true to reconstruct phase from clean magnitude only.
-# Reduces "ghost voice" / phase bleed-through but adds ~1-2s processing time.
-USE_GRIFFIN_LIM = _bool_env("USE_GRIFFIN_LIM", False)
+# Griffin-Lim phase reconstruction — on by default to avoid noisy-phase bleed-through.
+# Set USE_GRIFFIN_LIM=false to use noisy phase instead (faster but less clean).
+USE_GRIFFIN_LIM = _bool_env("USE_GRIFFIN_LIM", True)
 GRIFFIN_LIM_ITER = _int_env("GRIFFIN_LIM_ITER", _CFG_GRIFFIN_LIM_ITER, minimum=4)
+
+# Residual suppression sharpens the model mask to attenuate low-confidence bins,
+# which reduces faint background speech that survives denoising.
+APPLY_RESIDUAL_SUPPRESS = _bool_env("APPLY_RESIDUAL_SUPPRESS", True)
+RESIDUAL_SUPPRESS_POWER = _float_env("RESIDUAL_SUPPRESS_POWER", 2.0, minimum=1.0, maximum=4.0)
+RESIDUAL_SUPPRESS_FLOOR = _float_env("RESIDUAL_SUPPRESS_FLOOR", 0.08, minimum=0.0, maximum=0.5)
 
 
 def _load_audio_with_fallback(path: Path) -> tuple[torch.Tensor, int]:
@@ -268,8 +273,8 @@ def _find_best_checkpoint() -> Path | None:
 def _griffin_lim(magnitude: torch.Tensor, window: torch.Tensor, n_iter: int) -> torch.Tensor:
     """Reconstruct waveform from magnitude-only spectrogram using Griffin-Lim algorithm.
 
-    Starting from the noisy phase avoids the typical random-phase warm-up cost
-    and converges faster to a consistent phase estimate for the clean magnitude.
+    Random-phase initialization is iteratively refined to a phase that is
+    consistent with the clean magnitude estimate.
     """
     # Initialise with random phase (uniform in [-pi, pi])
     phase = torch.rand_like(magnitude) * 2 * torch.pi - torch.pi
@@ -300,6 +305,21 @@ def _griffin_lim(magnitude: torch.Tensor, window: torch.Tensor, n_iter: int) -> 
         win_length=WIN_LENGTH,
         window=window,
     )
+
+
+def _apply_residual_suppress(mag_clean: torch.Tensor, mag_noisy: torch.Tensor) -> torch.Tensor:
+    """Attenuate low-confidence time-frequency bins that often carry background speech."""
+    if not APPLY_RESIDUAL_SUPPRESS:
+        return torch.clamp(mag_clean, min=0.0)
+
+    eps = 1e-8
+    mask = torch.clamp(mag_clean / (mag_noisy + eps), min=0.0, max=1.0)
+
+    # Power>1 sharpens the mask by suppressing bins where clean/noisy ratio is low.
+    attenuation = torch.pow(mask, RESIDUAL_SUPPRESS_POWER - 1.0)
+    attenuation = RESIDUAL_SUPPRESS_FLOOR + (1.0 - RESIDUAL_SUPPRESS_FLOOR) * attenuation
+
+    return torch.clamp(mag_clean * attenuation, min=0.0)
 
 
 def _estimate_noise_floor(magnitude: torch.Tensor) -> torch.Tensor:
@@ -408,6 +428,14 @@ def _load_model() -> UNet | None:
         POSTFILTER_CUTOFF_HZ,
         POSTFILTER_STRENGTH,
     )
+    logger.info(
+        "Phase/residual settings: griffin_lim=%s(iter=%d), residual_suppress=%s(power=%.2f,floor=%.2f)",
+        USE_GRIFFIN_LIM,
+        GRIFFIN_LIM_ITER,
+        APPLY_RESIDUAL_SUPPRESS,
+        RESIDUAL_SUPPRESS_POWER,
+        RESIDUAL_SUPPRESS_FLOOR,
+    )
     logger.info("Model loaded successfully (%d params)", sum(p.numel() for p in model.parameters()))
     return model
 
@@ -452,6 +480,9 @@ async def health():
         "status": "ok" if _model is not None else "error",
         "model_loaded": _model is not None,
         "device": str(_device),
+        "use_griffin_lim": USE_GRIFFIN_LIM,
+        "griffin_lim_iter": GRIFFIN_LIM_ITER,
+        "apply_residual_suppress": APPLY_RESIDUAL_SUPPRESS,
         "version": "1.0.0",
     }
 
@@ -537,6 +568,7 @@ async def denoise(file: UploadFile = File(...)):
 
         # Optional post-filter to reduce residual hiss after model inference.
         mag_clean = _apply_postfilter(mag_clean)
+        mag_clean = _apply_residual_suppress(mag_clean, mag)
 
         # Phase reconstruction — Griffin-Lim iterates to find a phase consistent
         # with the clean magnitude, eliminating noisy-phase bleed-through.
