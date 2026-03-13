@@ -68,6 +68,11 @@ except ImportError:
     _CFG_APPLY_WIENER_POSTFILTER = True
     _CFG_WIENER_BETA = 0.02
 
+try:
+    from config import GRIFFIN_LIM_ITER as _CFG_GRIFFIN_LIM_ITER
+except ImportError:
+    _CFG_GRIFFIN_LIM_ITER = 32
+
 logger = logging.getLogger("denoiser")
 logging.basicConfig(level=logging.INFO)
 
@@ -176,6 +181,12 @@ SPECTRAL_GATE_THRESHOLD = _float_env("SPECTRAL_GATE_THRESHOLD", _CFG_SPECTRAL_GA
 APPLY_WIENER_POSTFILTER = _bool_env("APPLY_WIENER_POSTFILTER", _CFG_APPLY_WIENER_POSTFILTER)
 WIENER_BETA = _float_env("WIENER_BETA", _CFG_WIENER_BETA, minimum=0.0)
 
+# Griffin-Lim phase reconstruction — off by default (uses noisy phase which is fast).
+# Set USE_GRIFFIN_LIM=true to reconstruct phase from clean magnitude only.
+# Reduces "ghost voice" / phase bleed-through but adds ~1-2s processing time.
+USE_GRIFFIN_LIM = _bool_env("USE_GRIFFIN_LIM", False)
+GRIFFIN_LIM_ITER = _int_env("GRIFFIN_LIM_ITER", _CFG_GRIFFIN_LIM_ITER, minimum=4)
+
 
 def _load_audio_with_fallback(path: Path) -> tuple[torch.Tensor, int]:
     """Load audio without hard dependency on TorchCodec.
@@ -252,6 +263,43 @@ def _find_best_checkpoint() -> Path | None:
         if candidate is not None:
             return candidate
     return None
+
+
+def _griffin_lim(magnitude: torch.Tensor, window: torch.Tensor, n_iter: int) -> torch.Tensor:
+    """Reconstruct waveform from magnitude-only spectrogram using Griffin-Lim algorithm.
+
+    Starting from the noisy phase avoids the typical random-phase warm-up cost
+    and converges faster to a consistent phase estimate for the clean magnitude.
+    """
+    # Initialise with random phase (uniform in [-pi, pi])
+    phase = torch.rand_like(magnitude) * 2 * torch.pi - torch.pi
+    for _ in range(n_iter):
+        stft_est = magnitude * torch.exp(1j * phase)
+        waveform = torch.istft(
+            stft_est,
+            n_fft=N_FFT,
+            hop_length=HOP_LENGTH,
+            win_length=WIN_LENGTH,
+            window=window,
+        )
+        stft_rebuilt = torch.stft(
+            waveform,
+            n_fft=N_FFT,
+            hop_length=HOP_LENGTH,
+            win_length=WIN_LENGTH,
+            window=window,
+            return_complex=True,
+        )
+        phase = torch.angle(stft_rebuilt)
+    # Final reconstruction with converged phase
+    stft_final = magnitude * torch.exp(1j * phase)
+    return torch.istft(
+        stft_final,
+        n_fft=N_FFT,
+        hop_length=HOP_LENGTH,
+        win_length=WIN_LENGTH,
+        window=window,
+    )
 
 
 def _estimate_noise_floor(magnitude: torch.Tensor) -> torch.Tensor:
@@ -490,15 +538,20 @@ async def denoise(file: UploadFile = File(...)):
         # Optional post-filter to reduce residual hiss after model inference.
         mag_clean = _apply_postfilter(mag_clean)
 
-        # iSTFT
-        stft_clean = mag_clean * torch.exp(1j * phase)
-        waveform_clean = torch.istft(
-            stft_clean,
-            n_fft=N_FFT,
-            hop_length=HOP_LENGTH,
-            win_length=WIN_LENGTH,
-            window=window,
-        )
+        # Phase reconstruction — Griffin-Lim iterates to find a phase consistent
+        # with the clean magnitude, eliminating noisy-phase bleed-through.
+        # Falls back to noisy-phase ISTFT when USE_GRIFFIN_LIM=false (faster).
+        if USE_GRIFFIN_LIM:
+            waveform_clean = _griffin_lim(mag_clean, window, GRIFFIN_LIM_ITER)
+        else:
+            stft_clean = mag_clean * torch.exp(1j * phase)
+            waveform_clean = torch.istft(
+                stft_clean,
+                n_fft=N_FFT,
+                hop_length=HOP_LENGTH,
+                win_length=WIN_LENGTH,
+                window=window,
+            )
 
         # Normalize to prevent clipping
         peak = waveform_clean.abs().max()
