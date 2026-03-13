@@ -48,6 +48,26 @@ try:
 except ImportError:
     _CFG_WINDOW = None
 
+# Optional post-filter defaults from training config.
+try:
+    from config import (
+        APPLY_POSTFILTER as _CFG_APPLY_POSTFILTER,
+        POSTFILTER_CUTOFF_HZ as _CFG_POSTFILTER_CUTOFF_HZ,
+        POSTFILTER_STRENGTH as _CFG_POSTFILTER_STRENGTH,
+        APPLY_SPECTRAL_GATE as _CFG_APPLY_SPECTRAL_GATE,
+        SPECTRAL_GATE_THRESHOLD as _CFG_SPECTRAL_GATE_THRESHOLD,
+        APPLY_WIENER_POSTFILTER as _CFG_APPLY_WIENER_POSTFILTER,
+        WIENER_BETA as _CFG_WIENER_BETA,
+    )
+except ImportError:
+    _CFG_APPLY_POSTFILTER = True
+    _CFG_POSTFILTER_CUTOFF_HZ = 6500.0
+    _CFG_POSTFILTER_STRENGTH = 0.35
+    _CFG_APPLY_SPECTRAL_GATE = True
+    _CFG_SPECTRAL_GATE_THRESHOLD = 1.5
+    _CFG_APPLY_WIENER_POSTFILTER = True
+    _CFG_WIENER_BETA = 0.02
+
 logger = logging.getLogger("denoiser")
 logging.basicConfig(level=logging.INFO)
 
@@ -81,6 +101,45 @@ def _int_env(name: str, default: int, *, minimum: int = 1) -> int:
     return value
 
 
+def _float_env(
+    name: str,
+    default: float,
+    *,
+    minimum: float | None = None,
+    maximum: float | None = None,
+) -> float:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    try:
+        value = float(raw)
+    except ValueError:
+        logger.warning("Invalid float for %s=%r. Using default %s.", name, raw, default)
+        return default
+    if minimum is not None and value < minimum:
+        logger.warning("%s=%s is below minimum %s. Using default %s.", name, value, minimum, default)
+        return default
+    if maximum is not None and value > maximum:
+        logger.warning("%s=%s is above maximum %s. Using default %s.", name, value, maximum, default)
+        return default
+    return value
+
+
+def _bool_env(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+
+    value = raw.strip().lower()
+    if value in {"1", "true", "yes", "on"}:
+        return True
+    if value in {"0", "false", "no", "off"}:
+        return False
+
+    logger.warning("Invalid boolean for %s=%r. Using default %s.", name, raw, default)
+    return default
+
+
 def _pick_checkpoint_from_dir(directory: Path) -> Path | None:
     if not directory.exists() or not directory.is_dir():
         return None
@@ -107,6 +166,15 @@ ALLOW_CREDENTIALS = "*" not in ALLOWED_ORIGINS
 # ── Accepted audio extensions ──
 ALLOWED_EXTENSIONS = {".wav", ".mp3", ".flac", ".ogg", ".webm"}
 MAX_DURATION_SEC = _int_env("MAX_DURATION_SEC", 325, minimum=10)
+
+# Optional post-filter controls (env overrides config defaults).
+APPLY_POSTFILTER = _bool_env("APPLY_POSTFILTER", _CFG_APPLY_POSTFILTER)
+POSTFILTER_CUTOFF_HZ = _float_env("POSTFILTER_CUTOFF_HZ", _CFG_POSTFILTER_CUTOFF_HZ, minimum=1000.0)
+POSTFILTER_STRENGTH = _float_env("POSTFILTER_STRENGTH", _CFG_POSTFILTER_STRENGTH, minimum=0.0, maximum=1.0)
+APPLY_SPECTRAL_GATE = _bool_env("APPLY_SPECTRAL_GATE", _CFG_APPLY_SPECTRAL_GATE)
+SPECTRAL_GATE_THRESHOLD = _float_env("SPECTRAL_GATE_THRESHOLD", _CFG_SPECTRAL_GATE_THRESHOLD, minimum=1.0)
+APPLY_WIENER_POSTFILTER = _bool_env("APPLY_WIENER_POSTFILTER", _CFG_APPLY_WIENER_POSTFILTER)
+WIENER_BETA = _float_env("WIENER_BETA", _CFG_WIENER_BETA, minimum=0.0)
 
 
 def _load_audio_with_fallback(path: Path) -> tuple[torch.Tensor, int]:
@@ -186,6 +254,46 @@ def _find_best_checkpoint() -> Path | None:
     return None
 
 
+def _estimate_noise_floor(magnitude: torch.Tensor) -> torch.Tensor:
+    """Estimate stationary background floor per frequency bin."""
+    try:
+        floor = torch.quantile(magnitude, q=0.10, dim=1, keepdim=True)
+    except Exception:
+        floor = torch.median(magnitude, dim=1, keepdim=True).values
+    return floor.clamp_min(1e-8)
+
+
+def _apply_postfilter(magnitude: torch.Tensor) -> torch.Tensor:
+    """Apply a light post-filter to suppress residual hiss without over-suppressing speech."""
+    if not APPLY_POSTFILTER:
+        return torch.clamp(magnitude, min=0.0)
+
+    filtered = torch.clamp(magnitude, min=0.0)
+    noise_floor = _estimate_noise_floor(filtered)
+
+    if APPLY_SPECTRAL_GATE:
+        threshold = noise_floor * SPECTRAL_GATE_THRESHOLD
+        gate = torch.sigmoid(((filtered / (threshold + 1e-8)) - 1.0) * 6.0)
+        filtered = filtered * gate
+
+    if APPLY_WIENER_POSTFILTER:
+        signal_power = filtered.pow(2)
+        noise_power = noise_floor.pow(2) * (1.0 + WIENER_BETA)
+        wiener_gain = signal_power / (signal_power + noise_power + 1e-8)
+        filtered = filtered * wiener_gain
+
+    nyquist = SAMPLE_RATE / 2.0
+    cutoff_hz = min(POSTFILTER_CUTOFF_HZ, nyquist)
+    if cutoff_hz < nyquist and POSTFILTER_STRENGTH > 0.0:
+        freqs = torch.linspace(0.0, nyquist, filtered.size(0), device=filtered.device, dtype=filtered.dtype).unsqueeze(1)
+        transition_hz = 500.0
+        lowpass_curve = torch.clamp((cutoff_hz + transition_hz - freqs) / transition_hz, 0.0, 1.0)
+        keep = (1.0 - POSTFILTER_STRENGTH) + (POSTFILTER_STRENGTH * lowpass_curve)
+        filtered = filtered * keep
+
+    return torch.clamp(filtered, min=0.0)
+
+
 def _load_model() -> UNet | None:
     ckpt_path = _find_best_checkpoint()
     if ckpt_path is None:
@@ -217,6 +325,16 @@ def _load_model() -> UNet | None:
         USE_LOG_MAG,
         MASK_MODE,
         LOSS_FUNCTION,
+    )
+    logger.info(
+        "Post-filter settings: enabled=%s, spectral_gate=%s(threshold=%.2f), wiener=%s(beta=%.3f), lowpass_cutoff=%.0fHz(strength=%.2f)",
+        APPLY_POSTFILTER,
+        APPLY_SPECTRAL_GATE,
+        SPECTRAL_GATE_THRESHOLD,
+        APPLY_WIENER_POSTFILTER,
+        WIENER_BETA,
+        POSTFILTER_CUTOFF_HZ,
+        POSTFILTER_STRENGTH,
     )
     logger.info("Model loaded successfully (%d params)", sum(p.numel() for p in model.parameters()))
     return model
@@ -344,6 +462,9 @@ async def denoise(file: UploadFile = File(...)):
         if USE_LOG_MAG:
             mag_clean = torch.expm1(mag_clean)
         mag_clean = torch.clamp(mag_clean, min=0.0)
+
+        # Optional post-filter to reduce residual hiss after model inference.
+        mag_clean = _apply_postfilter(mag_clean)
 
         # iSTFT
         stft_clean = mag_clean * torch.exp(1j * phase)

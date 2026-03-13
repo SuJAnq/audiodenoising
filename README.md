@@ -64,6 +64,15 @@ npm run dev
 - `MAX_DURATION_SEC=300`
 - `ALLOWED_ORIGINS=<vercel-domain>,http://localhost:3000`
 
+Optional residual-noise filter tuning:
+- `APPLY_POSTFILTER=true`
+- `APPLY_SPECTRAL_GATE=true`
+- `SPECTRAL_GATE_THRESHOLD=1.5`
+- `APPLY_WIENER_POSTFILTER=true`
+- `WIENER_BETA=0.02`
+- `POSTFILTER_CUTOFF_HZ=6500`
+- `POSTFILTER_STRENGTH=0.35`
+
 ## Deployment Notes
 
 - Large model binaries are not committed to GitHub because files over 100MB are blocked.
