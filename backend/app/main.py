@@ -264,7 +264,11 @@ def _estimate_noise_floor(magnitude: torch.Tensor) -> torch.Tensor:
 
 
 def _apply_postfilter(magnitude: torch.Tensor) -> torch.Tensor:
-    """Apply a light post-filter to suppress residual hiss without over-suppressing speech."""
+    """Apply a light post-filter to suppress residual hiss without over-suppressing speech.
+
+    The spectral gate mask is smoothed over neighbouring time frames to prevent
+    rapid on/off switching, which causes musical noise / repetition artifacts.
+    """
     if not APPLY_POSTFILTER:
         return torch.clamp(magnitude, min=0.0)
 
@@ -273,13 +277,33 @@ def _apply_postfilter(magnitude: torch.Tensor) -> torch.Tensor:
 
     if APPLY_SPECTRAL_GATE:
         threshold = noise_floor * SPECTRAL_GATE_THRESHOLD
-        gate = torch.sigmoid(((filtered / (threshold + 1e-8)) - 1.0) * 6.0)
+        # Compute soft gate in [0, 1] — steeper slope = sharper cutoff
+        gate = torch.sigmoid(((filtered / (threshold + 1e-8)) - 1.0) * 4.0)
+
+        # Temporally smooth the gate mask with a small median over time to avoid
+        # isolated surviving bins (the main cause of musical noise / "repetition")
+        if gate.size(1) >= 5:
+            # Unfold time dimension into a sliding window and take median per bin
+            kernel = 5
+            padded = torch.nn.functional.pad(gate, (kernel // 2, kernel // 2), mode="reflect")
+            # shape: (F, T, kernel)
+            windows = padded.unfold(1, kernel, 1)
+            gate = windows.median(dim=-1).values
+
         filtered = filtered * gate
 
     if APPLY_WIENER_POSTFILTER:
         signal_power = filtered.pow(2)
         noise_power = noise_floor.pow(2) * (1.0 + WIENER_BETA)
         wiener_gain = signal_power / (signal_power + noise_power + 1e-8)
+        # Smooth Wiener gain over time to reduce rapid gain fluctuations
+        if wiener_gain.size(1) >= 3:
+            wiener_gain = torch.nn.functional.avg_pool1d(
+                wiener_gain,
+                kernel_size=3,
+                stride=1,
+                padding=1,
+            )
         filtered = filtered * wiener_gain
 
     nyquist = SAMPLE_RATE / 2.0
