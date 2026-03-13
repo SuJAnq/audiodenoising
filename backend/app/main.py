@@ -168,6 +168,17 @@ TEMP_DIR.mkdir(parents=True, exist_ok=True)
 ALLOWED_ORIGINS = _parse_allowed_origins()
 ALLOW_CREDENTIALS = "*" not in ALLOWED_ORIGINS
 
+# Limit thread fan-out in constrained runtimes (e.g., HF cpu-basic) to avoid
+# memory spikes during startup and model execution.
+TORCH_THREADS = _int_env("TORCH_THREADS", 1, minimum=1)
+TORCH_INTEROP_THREADS = _int_env("TORCH_INTEROP_THREADS", 1, minimum=1)
+try:
+    torch.set_num_threads(TORCH_THREADS)
+    if hasattr(torch, "set_num_interop_threads"):
+        torch.set_num_interop_threads(TORCH_INTEROP_THREADS)
+except Exception as exc:
+    logger.warning("Unable to configure PyTorch thread limits: %s", exc)
+
 # ── Accepted audio extensions ──
 ALLOWED_EXTENSIONS = {".wav", ".mp3", ".flac", ".ogg", ".webm"}
 MAX_DURATION_SEC = _int_env("MAX_DURATION_SEC", 325, minimum=10)
@@ -479,6 +490,11 @@ def _load_model() -> UNet | None:
         SPEECH_SUPPRESS_STEEPNESS,
         SPEECH_SUPPRESS_FLOOR,
     )
+    logger.info(
+        "Thread settings: torch_threads=%d, torch_interop_threads=%d",
+        torch.get_num_threads(),
+        torch.get_num_interop_threads() if hasattr(torch, "get_num_interop_threads") else -1,
+    )
     logger.info("Model loaded successfully (%d params)", sum(p.numel() for p in model.parameters()))
     return model
 
@@ -527,6 +543,8 @@ async def health():
         "griffin_lim_iter": GRIFFIN_LIM_ITER,
         "apply_residual_suppress": APPLY_RESIDUAL_SUPPRESS,
         "apply_speech_band_suppress": APPLY_SPEECH_BAND_SUPPRESS,
+        "torch_threads": torch.get_num_threads(),
+        "torch_interop_threads": torch.get_num_interop_threads() if hasattr(torch, "get_num_interop_threads") else None,
         "version": "1.0.0",
     }
 
