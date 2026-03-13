@@ -192,6 +192,15 @@ APPLY_RESIDUAL_SUPPRESS = _bool_env("APPLY_RESIDUAL_SUPPRESS", True)
 RESIDUAL_SUPPRESS_POWER = _float_env("RESIDUAL_SUPPRESS_POWER", 2.0, minimum=1.0, maximum=4.0)
 RESIDUAL_SUPPRESS_FLOOR = _float_env("RESIDUAL_SUPPRESS_FLOOR", 0.08, minimum=0.0, maximum=0.5)
 
+# Speech-band suppression specifically targets voice-like residuals that remain
+# after denoising (e.g., faint background conversation leakage).
+APPLY_SPEECH_BAND_SUPPRESS = _bool_env("APPLY_SPEECH_BAND_SUPPRESS", True)
+SPEECH_BAND_MIN_HZ = _float_env("SPEECH_BAND_MIN_HZ", 180.0, minimum=20.0)
+SPEECH_BAND_MAX_HZ = _float_env("SPEECH_BAND_MAX_HZ", 4200.0, minimum=500.0)
+SPEECH_SUPPRESS_THRESHOLD = _float_env("SPEECH_SUPPRESS_THRESHOLD", 0.55, minimum=0.05, maximum=0.95)
+SPEECH_SUPPRESS_STEEPNESS = _float_env("SPEECH_SUPPRESS_STEEPNESS", 10.0, minimum=1.0, maximum=30.0)
+SPEECH_SUPPRESS_FLOOR = _float_env("SPEECH_SUPPRESS_FLOOR", 0.20, minimum=0.0, maximum=0.8)
+
 
 def _load_audio_with_fallback(path: Path) -> tuple[torch.Tensor, int]:
     """Load audio without hard dependency on TorchCodec.
@@ -322,6 +331,31 @@ def _apply_residual_suppress(mag_clean: torch.Tensor, mag_noisy: torch.Tensor) -
     return torch.clamp(mag_clean * attenuation, min=0.0)
 
 
+def _apply_speech_band_suppress(mag_clean: torch.Tensor, mag_noisy: torch.Tensor) -> torch.Tensor:
+    """Suppress low-confidence bins in the speech band to reduce leaked voices."""
+    if not APPLY_SPEECH_BAND_SUPPRESS:
+        return torch.clamp(mag_clean, min=0.0)
+
+    eps = 1e-8
+    mask = torch.clamp(mag_clean / (mag_noisy + eps), min=0.0, max=1.0)
+
+    # Smooth confidence over time to avoid rapid pumping artifacts.
+    if mask.size(1) >= 5:
+        mask = torch.nn.functional.avg_pool1d(mask.unsqueeze(0), kernel_size=5, stride=1, padding=2).squeeze(0)
+
+    keep = torch.sigmoid((mask - SPEECH_SUPPRESS_THRESHOLD) * SPEECH_SUPPRESS_STEEPNESS)
+    keep = SPEECH_SUPPRESS_FLOOR + (1.0 - SPEECH_SUPPRESS_FLOOR) * keep
+
+    nyquist = SAMPLE_RATE / 2.0
+    min_hz = max(0.0, min(SPEECH_BAND_MIN_HZ, nyquist))
+    max_hz = max(min_hz, min(SPEECH_BAND_MAX_HZ, nyquist))
+    freqs = torch.linspace(0.0, nyquist, mag_clean.size(0), device=mag_clean.device, dtype=mag_clean.dtype).unsqueeze(1)
+    band = ((freqs >= min_hz) & (freqs <= max_hz)).to(mag_clean.dtype)
+
+    gain = (1.0 - band) + (band * keep)
+    return torch.clamp(mag_clean * gain, min=0.0)
+
+
 def _estimate_noise_floor(magnitude: torch.Tensor) -> torch.Tensor:
     """Estimate stationary background floor per frequency bin."""
     try:
@@ -436,6 +470,15 @@ def _load_model() -> UNet | None:
         RESIDUAL_SUPPRESS_POWER,
         RESIDUAL_SUPPRESS_FLOOR,
     )
+    logger.info(
+        "Speech-band suppress: enabled=%s, band=%.0f-%.0fHz, threshold=%.2f, steepness=%.1f, floor=%.2f",
+        APPLY_SPEECH_BAND_SUPPRESS,
+        SPEECH_BAND_MIN_HZ,
+        SPEECH_BAND_MAX_HZ,
+        SPEECH_SUPPRESS_THRESHOLD,
+        SPEECH_SUPPRESS_STEEPNESS,
+        SPEECH_SUPPRESS_FLOOR,
+    )
     logger.info("Model loaded successfully (%d params)", sum(p.numel() for p in model.parameters()))
     return model
 
@@ -483,6 +526,7 @@ async def health():
         "use_griffin_lim": USE_GRIFFIN_LIM,
         "griffin_lim_iter": GRIFFIN_LIM_ITER,
         "apply_residual_suppress": APPLY_RESIDUAL_SUPPRESS,
+        "apply_speech_band_suppress": APPLY_SPEECH_BAND_SUPPRESS,
         "version": "1.0.0",
     }
 
@@ -569,6 +613,7 @@ async def denoise(file: UploadFile = File(...)):
         # Optional post-filter to reduce residual hiss after model inference.
         mag_clean = _apply_postfilter(mag_clean)
         mag_clean = _apply_residual_suppress(mag_clean, mag)
+        mag_clean = _apply_speech_band_suppress(mag_clean, mag)
 
         # Phase reconstruction — Griffin-Lim iterates to find a phase consistent
         # with the clean magnitude, eliminating noisy-phase bleed-through.
