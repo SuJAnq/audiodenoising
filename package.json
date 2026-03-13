@@ -1,16 +1,16 @@
 {
   "name": "minorproject",
   "version": "1.0.0",
-  "description": "",
-  "homepage": "https://github.com/Saman0102/MinorProject#readme",
+  "description": "Full-stack audio denoising project with React frontend and FastAPI/PyTorch backend.",
+  "homepage": "https://github.com/SuJAnq/audiodenoising#readme",
   "bugs": {
-    "url": "https://github.com/Saman0102/MinorProject/issues"
+    "url": "https://github.com/SuJAnq/audiodenoising/issues"
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/Saman0102/MinorProject.git"
+    "url": "git+https://github.com/SuJAnq/audiodenoising.git"
   },
-  "license": "ISC",
+  "license": "Apache-2.0",
   "author": "",
   "type": "commonjs",
   "main": "index.js",
