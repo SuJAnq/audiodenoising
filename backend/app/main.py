@@ -19,6 +19,7 @@ from fastapi import FastAPI, File, UploadFile, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from starlette.background import BackgroundTask
+from starlette.concurrency import run_in_threadpool
 
 try:
     import soundfile as sf
@@ -182,6 +183,12 @@ except Exception as exc:
 # ── Accepted audio extensions ──
 ALLOWED_EXTENSIONS = {".wav", ".mp3", ".flac", ".ogg", ".webm"}
 MAX_DURATION_SEC = _int_env("MAX_DURATION_SEC", 325, minimum=10)
+UPLOAD_CHUNK_BYTES = _int_env("UPLOAD_CHUNK_BYTES", 1024 * 1024, minimum=64 * 1024)
+
+# Long-audio safety guards to keep the API responsive on constrained CPUs.
+LONG_AUDIO_SEC = _int_env("LONG_AUDIO_SEC", 150, minimum=30)
+LONG_AUDIO_DISABLE_GRIFFIN_LIM = _bool_env("LONG_AUDIO_DISABLE_GRIFFIN_LIM", True)
+LONG_AUDIO_GRIFFIN_LIM_ITER = _int_env("LONG_AUDIO_GRIFFIN_LIM_ITER", 12, minimum=1)
 
 # Optional post-filter controls (env overrides config defaults).
 APPLY_POSTFILTER = _bool_env("APPLY_POSTFILTER", _CFG_APPLY_POSTFILTER)
@@ -302,6 +309,16 @@ def _save_audio_with_fallback(path: Path, waveform: torch.Tensor, sample_rate: i
     sf.write(str(path), audio_np, sample_rate)
 
 
+async def _save_upload_stream(upload: UploadFile, destination: Path) -> None:
+    """Stream uploaded file to disk to avoid loading full payload into memory."""
+    with destination.open("wb") as handle:
+        while True:
+            chunk = await upload.read(UPLOAD_CHUNK_BYTES)
+            if not chunk:
+                break
+            handle.write(chunk)
+
+
 def _find_best_checkpoint() -> Path | None:
     """Pick checkpoint from MODEL_PATH override, then primary and fallback directories."""
     if MODEL_PATH:
@@ -319,6 +336,25 @@ def _find_best_checkpoint() -> Path | None:
         if candidate is not None:
             return candidate
     return None
+
+
+def _resolve_runtime_profile(duration_sec: float) -> tuple[str, bool, int]:
+    """Adjust expensive inference steps for long clips to avoid timeouts/OOM."""
+    mode = DENOISE_MODE
+    use_griffin_lim = USE_GRIFFIN_LIM
+    griffin_lim_iter = GRIFFIN_LIM_ITER
+
+    if duration_sec >= LONG_AUDIO_SEC:
+        if LONG_AUDIO_DISABLE_GRIFFIN_LIM:
+            use_griffin_lim = False
+        else:
+            griffin_lim_iter = min(griffin_lim_iter, LONG_AUDIO_GRIFFIN_LIM_ITER)
+
+        # Cap suppression profile for long clips to reduce processing overhead.
+        if mode == "aggressive":
+            mode = "balanced"
+
+    return mode, use_griffin_lim, griffin_lim_iter
 
 
 def _griffin_lim(
@@ -624,6 +660,13 @@ def _load_model() -> UNet | None:
     )
     logger.info("Denoise mode: %s (trained|balanced|aggressive)", DENOISE_MODE)
     logger.info(
+        "Long-audio safety: threshold=%ss, disable_griffin_lim=%s, fallback_iter=%d, upload_chunk_bytes=%d",
+        LONG_AUDIO_SEC,
+        LONG_AUDIO_DISABLE_GRIFFIN_LIM,
+        LONG_AUDIO_GRIFFIN_LIM_ITER,
+        UPLOAD_CHUNK_BYTES,
+    )
+    logger.info(
         "Thread settings: torch_threads=%d, torch_interop_threads=%d",
         torch.get_num_threads(),
         torch.get_num_interop_threads() if hasattr(torch, "get_num_interop_threads") else -1,
@@ -680,10 +723,122 @@ async def health():
         "apply_loudness_match": APPLY_LOUDNESS_MATCH,
         "loudness_target_ratio": LOUDNESS_TARGET_RATIO,
         "denoise_mode": DENOISE_MODE,
+        "long_audio_sec": LONG_AUDIO_SEC,
+        "long_audio_disable_griffin_lim": LONG_AUDIO_DISABLE_GRIFFIN_LIM,
         "torch_threads": torch.get_num_threads(),
         "torch_interop_threads": torch.get_num_interop_threads() if hasattr(torch, "get_num_interop_threads") else None,
         "version": "1.0.0",
     }
+
+
+def _denoise_file_sync(tmp_input: Path, original_filename: str, uid: str) -> tuple[Path, float, str]:
+    """CPU-heavy denoising path executed in a worker thread."""
+    t0 = time.perf_counter()
+
+    # Load audio
+    waveform, sr = _load_audio_with_fallback(tmp_input)
+
+    # Resample if needed
+    if sr != SAMPLE_RATE:
+        resampler = torchaudio.transforms.Resample(orig_freq=sr, new_freq=SAMPLE_RATE)
+        waveform = resampler(waveform)
+
+    # Mono
+    if waveform.shape[0] > 1:
+        waveform = waveform.mean(dim=0, keepdim=True)
+    waveform = waveform.squeeze(0)  # (T,)
+
+    # Duration check
+    dur = waveform.shape[0] / SAMPLE_RATE
+    if dur > MAX_DURATION_SEC:
+        raise HTTPException(400, detail=f"Audio too long ({dur:.1f}s, max {MAX_DURATION_SEC}s).")
+
+    runtime_mode, runtime_use_griffin_lim, runtime_griffin_lim_iter = _resolve_runtime_profile(dur)
+    logger.info(
+        "Runtime profile: duration=%.1fs, mode=%s, griffin_lim=%s, iter=%d",
+        dur,
+        runtime_mode,
+        runtime_use_griffin_lim,
+        runtime_griffin_lim_iter,
+    )
+
+    # STFT
+    window = (_CFG_WINDOW if _CFG_WINDOW is not None else torch.hann_window(WIN_LENGTH)).to(_device)
+    stft = torch.stft(
+        waveform.to(_device),
+        n_fft=N_FFT,
+        hop_length=HOP_LENGTH,
+        win_length=WIN_LENGTH,
+        window=window,
+        return_complex=True,
+    )
+    mag = torch.abs(stft)       # (F, T)
+    phase = torch.angle(stft)   # (F, T)
+
+    # Match training input domain: model expects log-magnitude when USE_LOG_MAG=True.
+    model_input = torch.log1p(mag) if USE_LOG_MAG else mag
+
+    # Model forward pass
+    mag_input = model_input.unsqueeze(0).unsqueeze(0)  # (1, 1, F, T)
+    with torch.no_grad():
+        mag_clean = _model(mag_input)  # (1, 1, F, T)
+
+    if mag_clean.dim() != 4 or mag_clean.size(1) != 1:
+        raise RuntimeError(
+            f"Unsupported model output shape {tuple(mag_clean.shape)}. "
+            "Backend currently expects 1-channel magnitude output."
+        )
+
+    mag_clean = mag_clean.squeeze(0).squeeze(0)  # (F, T)
+
+    # Convert back to linear magnitude before ISTFT when model output is log-magnitude.
+    if USE_LOG_MAG:
+        mag_clean = torch.expm1(mag_clean)
+    mag_clean = torch.clamp(mag_clean, min=0.0)
+
+    # Optional post-filter to reduce residual hiss after model inference.
+    mag_clean = _apply_postfilter(mag_clean)
+
+    # Profile-based suppression stack:
+    # - trained: closest to model output (least speech damage)
+    # - balanced: moderate residual suppression
+    # - aggressive: strongest background suppression
+    if runtime_mode in {"balanced", "aggressive"}:
+        mag_clean = _apply_residual_suppress(mag_clean, mag)
+        mag_clean = _apply_speech_band_suppress(mag_clean, mag)
+    if runtime_mode == "aggressive":
+        mag_clean = _apply_frame_speech_gate(mag_clean, mag)
+
+    # Phase reconstruction — Griffin-Lim iterates to find a phase consistent
+    # with the clean magnitude, eliminating noisy-phase bleed-through.
+    # Falls back to noisy-phase ISTFT when use_griffin_lim=false (faster).
+    if runtime_use_griffin_lim:
+        waveform_clean = _griffin_lim(mag_clean, window, runtime_griffin_lim_iter, init_phase=phase)
+    else:
+        stft_clean = mag_clean * torch.exp(1j * phase)
+        waveform_clean = torch.istft(
+            stft_clean,
+            n_fft=N_FFT,
+            hop_length=HOP_LENGTH,
+            win_length=WIN_LENGTH,
+            window=window,
+        )
+
+    waveform_clean = _apply_loudness_match(waveform_clean, waveform.to(waveform_clean.device))
+
+    # Normalize only when needed to avoid re-amplifying residual background.
+    peak = waveform_clean.abs().max()
+    if peak > 0.95:
+        waveform_clean = waveform_clean / peak * 0.95
+
+    # Save output
+    out_path = TEMP_DIR / f"denoised_{uid}.wav"
+    _save_audio_with_fallback(out_path, waveform_clean.unsqueeze(0), SAMPLE_RATE)
+
+    elapsed = time.perf_counter() - t0
+    logger.info("Denoised %s in %.2fs", original_filename, elapsed)
+    output_name = f"denoised_{Path(original_filename or 'audio').stem}.wav"
+    return out_path, elapsed, output_name
 
 
 @app.post("/api/denoise")
@@ -705,112 +860,22 @@ async def denoise(file: UploadFile = File(...)):
     uid = uuid.uuid4().hex[:12]
     tmp_input = TEMP_DIR / f"input_{uid}{ext}"
     try:
-        contents = await file.read()
-        tmp_input.write_bytes(contents)
+        await _save_upload_stream(file, tmp_input)
     except Exception as exc:
         raise HTTPException(500, detail=f"Failed to save upload: {exc}")
 
-    t0 = time.perf_counter()
-
     try:
-        # Load audio
-        waveform, sr = _load_audio_with_fallback(tmp_input)
-
-        # Resample if needed
-        if sr != SAMPLE_RATE:
-            resampler = torchaudio.transforms.Resample(orig_freq=sr, new_freq=SAMPLE_RATE)
-            waveform = resampler(waveform)
-
-        # Mono
-        if waveform.shape[0] > 1:
-            waveform = waveform.mean(dim=0, keepdim=True)
-        waveform = waveform.squeeze(0)  # (T,)
-
-        # Duration check
-        dur = waveform.shape[0] / SAMPLE_RATE
-        if dur > MAX_DURATION_SEC:
-            raise HTTPException(400, detail=f"Audio too long ({dur:.1f}s, max {MAX_DURATION_SEC}s).")
-
-        # STFT
-        window = (_CFG_WINDOW if _CFG_WINDOW is not None else torch.hann_window(WIN_LENGTH)).to(_device)
-        stft = torch.stft(
-            waveform.to(_device),
-            n_fft=N_FFT,
-            hop_length=HOP_LENGTH,
-            win_length=WIN_LENGTH,
-            window=window,
-            return_complex=True,
+        out_path, elapsed, output_name = await run_in_threadpool(
+            _denoise_file_sync,
+            tmp_input,
+            file.filename or "audio",
+            uid,
         )
-        mag = torch.abs(stft)       # (F, T)
-        phase = torch.angle(stft)   # (F, T)
-
-        # Match training input domain: model expects log-magnitude when USE_LOG_MAG=True.
-        model_input = torch.log1p(mag) if USE_LOG_MAG else mag
-
-        # Model forward pass
-        mag_input = model_input.unsqueeze(0).unsqueeze(0)  # (1, 1, F, T)
-        with torch.no_grad():
-            mag_clean = _model(mag_input)  # (1, 1, F, T)
-
-        if mag_clean.dim() != 4 or mag_clean.size(1) != 1:
-            raise RuntimeError(
-                f"Unsupported model output shape {tuple(mag_clean.shape)}. "
-                "Backend currently expects 1-channel magnitude output."
-            )
-
-        mag_clean = mag_clean.squeeze(0).squeeze(0)  # (F, T)
-
-        # Convert back to linear magnitude before ISTFT when model output is log-magnitude.
-        if USE_LOG_MAG:
-            mag_clean = torch.expm1(mag_clean)
-        mag_clean = torch.clamp(mag_clean, min=0.0)
-
-        # Optional post-filter to reduce residual hiss after model inference.
-        mag_clean = _apply_postfilter(mag_clean)
-
-        # Profile-based suppression stack:
-        # - trained: closest to model output (least speech damage)
-        # - balanced: moderate residual suppression
-        # - aggressive: strongest background suppression
-        if DENOISE_MODE in {"balanced", "aggressive"}:
-            mag_clean = _apply_residual_suppress(mag_clean, mag)
-            mag_clean = _apply_speech_band_suppress(mag_clean, mag)
-        if DENOISE_MODE == "aggressive":
-            mag_clean = _apply_frame_speech_gate(mag_clean, mag)
-
-        # Phase reconstruction — Griffin-Lim iterates to find a phase consistent
-        # with the clean magnitude, eliminating noisy-phase bleed-through.
-        # Falls back to noisy-phase ISTFT when USE_GRIFFIN_LIM=false (faster).
-        if USE_GRIFFIN_LIM:
-            waveform_clean = _griffin_lim(mag_clean, window, GRIFFIN_LIM_ITER, init_phase=phase)
-        else:
-            stft_clean = mag_clean * torch.exp(1j * phase)
-            waveform_clean = torch.istft(
-                stft_clean,
-                n_fft=N_FFT,
-                hop_length=HOP_LENGTH,
-                win_length=WIN_LENGTH,
-                window=window,
-            )
-
-        waveform_clean = _apply_loudness_match(waveform_clean, waveform.to(waveform_clean.device))
-
-        # Normalize only when needed to avoid re-amplifying residual background.
-        peak = waveform_clean.abs().max()
-        if peak > 0.95:
-            waveform_clean = waveform_clean / peak * 0.95
-
-        # Save output
-        out_path = TEMP_DIR / f"denoised_{uid}.wav"
-        _save_audio_with_fallback(out_path, waveform_clean.unsqueeze(0), SAMPLE_RATE)
-
-        elapsed = time.perf_counter() - t0
-        logger.info("Denoised %s in %.2fs", file.filename, elapsed)
 
         return FileResponse(
             str(out_path),
             media_type="audio/wav",
-            filename=f"denoised_{Path(file.filename or 'audio').stem}.wav",
+            filename=output_name,
             headers={"X-Processing-Time": f"{elapsed:.3f}"},
             background=BackgroundTask(out_path.unlink, missing_ok=True),
         )
