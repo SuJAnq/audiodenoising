@@ -229,6 +229,20 @@ APPLY_LOUDNESS_MATCH = _bool_env("APPLY_LOUDNESS_MATCH", True)
 LOUDNESS_TARGET_RATIO = _float_env("LOUDNESS_TARGET_RATIO", 0.90, minimum=0.4, maximum=1.2)
 LOUDNESS_MAX_GAIN = _float_env("LOUDNESS_MAX_GAIN", 1.45, minimum=1.0, maximum=4.0)
 
+# Denoise profile controls how much post-processing is applied after model
+# prediction. "trained" stays closest to model behavior seen during training.
+_DENOISE_MODE_RAW = os.getenv("DENOISE_MODE", "trained").strip().lower()
+_VALID_DENOISE_MODES = {"trained", "balanced", "aggressive"}
+if _DENOISE_MODE_RAW not in _VALID_DENOISE_MODES:
+    logger.warning(
+        "Invalid DENOISE_MODE=%r. Falling back to 'trained'. Valid options: %s",
+        _DENOISE_MODE_RAW,
+        sorted(_VALID_DENOISE_MODES),
+    )
+    DENOISE_MODE = "trained"
+else:
+    DENOISE_MODE = _DENOISE_MODE_RAW
+
 
 def _load_audio_with_fallback(path: Path) -> tuple[torch.Tensor, int]:
     """Load audio without hard dependency on TorchCodec.
@@ -608,6 +622,7 @@ def _load_model() -> UNet | None:
         LOUDNESS_TARGET_RATIO,
         LOUDNESS_MAX_GAIN,
     )
+    logger.info("Denoise mode: %s (trained|balanced|aggressive)", DENOISE_MODE)
     logger.info(
         "Thread settings: torch_threads=%d, torch_interop_threads=%d",
         torch.get_num_threads(),
@@ -664,6 +679,7 @@ async def health():
         "apply_frame_speech_gate": APPLY_FRAME_SPEECH_GATE,
         "apply_loudness_match": APPLY_LOUDNESS_MATCH,
         "loudness_target_ratio": LOUDNESS_TARGET_RATIO,
+        "denoise_mode": DENOISE_MODE,
         "torch_threads": torch.get_num_threads(),
         "torch_interop_threads": torch.get_num_interop_threads() if hasattr(torch, "get_num_interop_threads") else None,
         "version": "1.0.0",
@@ -751,9 +767,16 @@ async def denoise(file: UploadFile = File(...)):
 
         # Optional post-filter to reduce residual hiss after model inference.
         mag_clean = _apply_postfilter(mag_clean)
-        mag_clean = _apply_residual_suppress(mag_clean, mag)
-        mag_clean = _apply_speech_band_suppress(mag_clean, mag)
-        mag_clean = _apply_frame_speech_gate(mag_clean, mag)
+
+        # Profile-based suppression stack:
+        # - trained: closest to model output (least speech damage)
+        # - balanced: moderate residual suppression
+        # - aggressive: strongest background suppression
+        if DENOISE_MODE in {"balanced", "aggressive"}:
+            mag_clean = _apply_residual_suppress(mag_clean, mag)
+            mag_clean = _apply_speech_band_suppress(mag_clean, mag)
+        if DENOISE_MODE == "aggressive":
+            mag_clean = _apply_frame_speech_gate(mag_clean, mag)
 
         # Phase reconstruction — Griffin-Lim iterates to find a phase consistent
         # with the clean magnitude, eliminating noisy-phase bleed-through.
