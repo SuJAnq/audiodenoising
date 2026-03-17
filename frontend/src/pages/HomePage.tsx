@@ -269,24 +269,22 @@ export default function HomePage({
                     )}
                   </div>
                 )}
+              </div>
 
-                <div className="results-grid">
-                  <div className="results-column">
-                    <div className="audio-player__label">Original (Noisy)</div>
-                    {originalUrl && (
-                      <SpectrogramVisualizer audioUrl={originalUrl} />
-                    )}
-                    {originalUrl && <WaveformVisualizer audioUrl={originalUrl} />}
-                    {originalUrl && (
-                      <audio controls src={originalUrl} preload="metadata" />
-                    )}
-                  </div>
-                  <div className="results-column">
-                    <div className="audio-player__label">Denoised (Clean)</div>
-                    <SpectrogramVisualizer audioUrl={denoisedUrl} />
-                    <WaveformVisualizer audioUrl={denoisedUrl} />
-                    <audio controls src={denoisedUrl} preload="metadata" />
-                  </div>
+              <div className="results-grid">
+                <div className="results-column">
+                  <div className="audio-player__label">Original (Noisy)</div>
+                  {originalUrl && <SpectrogramVisualizer audioUrl={originalUrl} />}
+                  {originalUrl && <WaveformVisualizer audioUrl={originalUrl} />}
+                  {originalUrl && (
+                    <audio controls src={originalUrl} preload="metadata" />
+                  )}
+                </div>
+                <div className="results-column">
+                  <div className="audio-player__label">Denoised (Clean)</div>
+                  <SpectrogramVisualizer audioUrl={denoisedUrl} />
+                  <WaveformVisualizer audioUrl={denoisedUrl} />
+                  <audio controls src={denoisedUrl} preload="metadata" />
                 </div>
               </div>
 
