@@ -205,7 +205,7 @@ export default function HomePage({
                 onClick={() => setIsExtraInfoVisible((visible) => !visible)}
               >
                 <span>
-                  {isExtraInfoVisible ? "Hide extra info" : "Show extra info"}
+                  {isExtraInfoVisible ? "Hide metrics" : "Show metrics"}
                 </span>
                 <svg
                   className="results-toggle__icon"
