@@ -14,7 +14,7 @@ A full-stack deep-learning app for speech denoising with a React frontend and a 
 
 ## Live Deployment
 
-- Frontend (Vercel): https://audiodenoising-8m9s-8z44v7s2v-sujan-suwals-projects.vercel.app
+- Frontend (Vercel): https://audiodenoising.vercel.app
 - Backend (Hugging Face Space): https://sujan12321-audiodenoising.hf.space
 - Health check: https://sujan12321-audiodenoising.hf.space/api/health
 
@@ -62,7 +62,7 @@ npm run dev
 
 - `MODEL_PATH=/app/backend/models/unet_best.pt`
 - `MAX_DURATION_SEC=300`
-- `ALLOWED_ORIGINS=<vercel-domain>,http://localhost:3000`
+- `ALLOWED_ORIGINS=https://audiodenoising.vercel.app,http://localhost:3000`
 
 Optional residual-noise filter tuning:
 - `APPLY_POSTFILTER=true`
@@ -75,6 +75,8 @@ Optional residual-noise filter tuning:
 
 ## Deployment Notes
 
+- Use `https://audiodenoising.vercel.app` as the stable production frontend URL. Deployment-specific Vercel URLs with random suffixes are snapshots and do not update in place.
+- The repo root now includes `vercel.json` so Vercel can build the frontend from `frontend/` even when the project root is set to the repository root.
 - Large model binaries are not committed to GitHub because files over 100MB are blocked.
 - The Docker build downloads the model from Hugging Face Model Hub at build time.
 - If frontend URL changes, update `ALLOWED_ORIGINS` in the Hugging Face Space settings.
