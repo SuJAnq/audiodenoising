@@ -16,6 +16,7 @@ export default function HomePage({
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<DenoiseResponse | null>(null);
   const [denoisedUrl, setDenoisedUrl] = useState<string | null>(null);
+  const [isExtraInfoVisible, setIsExtraInfoVisible] = useState(true);
 
   const originalUrl = useMemo(
     () => (file ? URL.createObjectURL(file) : null),
@@ -30,6 +31,7 @@ export default function HomePage({
   const handleFileSelect = useCallback((f: File) => {
     setResult(null);
     setDenoisedUrl(null);
+    setIsExtraInfoVisible(true);
     setError(null);
     setProgress(0);
     setState("idle");
@@ -40,6 +42,7 @@ export default function HomePage({
     setFile(null);
     setResult(null);
     setDenoisedUrl(null);
+    setIsExtraInfoVisible(true);
     setState("idle");
     setError(null);
   }, []);
@@ -76,6 +79,7 @@ export default function HomePage({
   /* Auto-scroll to results page after denoising completes */
   useEffect(() => {
     if (state === "done") {
+      setIsExtraInfoVisible(true);
       setTimeout(() => {
         document
           .getElementById("page-results")
@@ -193,63 +197,98 @@ export default function HomePage({
                 </div>
               )}
 
-              {/* Spectrograms side-by-side */}
-              <div className="results-grid">
-                <div className="results-column">
-                  <div className="audio-player__label">Original (Noisy)</div>
-                  {originalUrl && (
-                    <SpectrogramVisualizer audioUrl={originalUrl} />
-                  )}
-                  {originalUrl && <WaveformVisualizer audioUrl={originalUrl} />}
-                  {originalUrl && (
-                    <audio controls src={originalUrl} preload="metadata" />
-                  )}
-                </div>
-                <div className="results-column">
-                  <div className="audio-player__label">Denoised (Clean)</div>
-                  <SpectrogramVisualizer audioUrl={denoisedUrl} />
-                  <WaveformVisualizer audioUrl={denoisedUrl} />
-                  <audio controls src={denoisedUrl} preload="metadata" />
+              <button
+                type="button"
+                className="results-toggle"
+                aria-expanded={isExtraInfoVisible}
+                aria-controls="results-extra-info"
+                onClick={() => setIsExtraInfoVisible((visible) => !visible)}
+              >
+                <span>
+                  {isExtraInfoVisible ? "Hide extra info" : "Show extra info"}
+                </span>
+                <svg
+                  className="results-toggle__icon"
+                  width="18"
+                  height="18"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="2"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  aria-hidden="true"
+                >
+                  <polyline points="6 9 12 15 18 9" />
+                </svg>
+              </button>
+
+              <div
+                id="results-extra-info"
+                className={[
+                  "results-extra-info",
+                  isExtraInfoVisible ? "results-extra-info--visible" : "",
+                ]
+                  .filter(Boolean)
+                  .join(" ")}
+                aria-hidden={!isExtraInfoVisible}
+              >
+                {result?.metrics && (
+                  <div className="metrics">
+                    {result.metrics.snr != null && (
+                      <div className="metric">
+                        <div className="metric__value">
+                          {result.metrics.snr.toFixed(2)}
+                        </div>
+                        <div className="metric__label">SNR (dB)</div>
+                      </div>
+                    )}
+                    {result.metrics.psnr != null && (
+                      <div className="metric">
+                        <div className="metric__value">
+                          {result.metrics.psnr.toFixed(2)}
+                        </div>
+                        <div className="metric__label">PSNR</div>
+                      </div>
+                    )}
+                    {result.metrics.ssim != null && (
+                      <div className="metric">
+                        <div className="metric__value">
+                          {result.metrics.ssim.toFixed(4)}
+                        </div>
+                        <div className="metric__label">SSIM</div>
+                      </div>
+                    )}
+                    {result.metrics.lsd != null && (
+                      <div className="metric">
+                        <div className="metric__value">
+                          {result.metrics.lsd.toFixed(3)}
+                        </div>
+                        <div className="metric__label">LSD</div>
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                <div className="results-grid">
+                  <div className="results-column">
+                    <div className="audio-player__label">Original (Noisy)</div>
+                    {originalUrl && (
+                      <SpectrogramVisualizer audioUrl={originalUrl} />
+                    )}
+                    {originalUrl && <WaveformVisualizer audioUrl={originalUrl} />}
+                    {originalUrl && (
+                      <audio controls src={originalUrl} preload="metadata" />
+                    )}
+                  </div>
+                  <div className="results-column">
+                    <div className="audio-player__label">Denoised (Clean)</div>
+                    <SpectrogramVisualizer audioUrl={denoisedUrl} />
+                    <WaveformVisualizer audioUrl={denoisedUrl} />
+                    <audio controls src={denoisedUrl} preload="metadata" />
+                  </div>
                 </div>
               </div>
-
-              {/* Metrics */}
-              {result?.metrics && (
-                <div className="metrics">
-                  {result.metrics.snr != null && (
-                    <div className="metric">
-                      <div className="metric__value">
-                        {result.metrics.snr.toFixed(2)}
-                      </div>
-                      <div className="metric__label">SNR (dB)</div>
-                    </div>
-                  )}
-                  {result.metrics.psnr != null && (
-                    <div className="metric">
-                      <div className="metric__value">
-                        {result.metrics.psnr.toFixed(2)}
-                      </div>
-                      <div className="metric__label">PSNR</div>
-                    </div>
-                  )}
-                  {result.metrics.ssim != null && (
-                    <div className="metric">
-                      <div className="metric__value">
-                        {result.metrics.ssim.toFixed(4)}
-                      </div>
-                      <div className="metric__label">SSIM</div>
-                    </div>
-                  )}
-                  {result.metrics.lsd != null && (
-                    <div className="metric">
-                      <div className="metric__value">
-                        {result.metrics.lsd.toFixed(3)}
-                      </div>
-                      <div className="metric__label">LSD</div>
-                    </div>
-                  )}
-                </div>
-              )}
 
               {/* Actions */}
               <div className="results-actions">
