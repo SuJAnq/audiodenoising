@@ -25,6 +25,196 @@ if (import.meta.env.PROD && !import.meta.env.VITE_API_BASE) {
 }
 
 const METRIC_NAMES = ["SNR", "PSNR", "SSIM", "LSD"] as const;
+const MAX_METRIC_SAMPLES = 48_000;
+const EPSILON = 1e-8;
+
+const hasAnyMetric = (metrics?: DenoiseMetrics): boolean =>
+  metrics?.snr != null ||
+  metrics?.psnr != null ||
+  metrics?.ssim != null ||
+  metrics?.lsd != null;
+
+const clamp = (value: number, min: number, max: number): number =>
+  Math.min(max, Math.max(min, value));
+
+const isMetricShape = (value: unknown): value is DenoiseMetrics =>
+  !!value &&
+  typeof value === "object" &&
+  ("snr" in value ||
+    "psnr" in value ||
+    "ssim" in value ||
+    "lsd" in value);
+
+function responseHasAnyMetrics(data: DenoiseResponse): boolean {
+  const metricsRaw = data.metrics;
+  const metricsRecord =
+    metricsRaw && typeof metricsRaw === "object"
+      ? (metricsRaw as Record<string, unknown>)
+      : undefined;
+
+  const candidates: Array<DenoiseMetrics | undefined> = [
+    data.before_metrics,
+    data.after_metrics,
+    data.noisy_metrics,
+    data.denoised_metrics,
+    data.metrics_before,
+    data.metrics_after,
+    isMetricShape(metricsRaw) ? metricsRaw : undefined,
+    isMetricShape(metricsRecord?.before) ? metricsRecord?.before : undefined,
+    isMetricShape(metricsRecord?.after) ? metricsRecord?.after : undefined,
+    isMetricShape(metricsRecord?.noisy) ? metricsRecord?.noisy : undefined,
+    isMetricShape(metricsRecord?.denoised)
+      ? metricsRecord?.denoised
+      : undefined,
+  ];
+
+  return candidates.some((metric) => hasAnyMetric(metric));
+}
+
+function downsampleForMetrics(signal: Float32Array): Float32Array {
+  if (signal.length <= MAX_METRIC_SAMPLES) return signal;
+
+  const stride = Math.ceil(signal.length / MAX_METRIC_SAMPLES);
+  const outLength = Math.ceil(signal.length / stride);
+  const out = new Float32Array(outLength);
+
+  let j = 0;
+  for (let i = 0; i < signal.length && j < outLength; i += stride) {
+    out[j] = signal[i];
+    j += 1;
+  }
+
+  return out;
+}
+
+async function decodeAudioToMono(blob: Blob): Promise<Float32Array> {
+  const AudioContextCtor =
+    window.AudioContext ||
+    (
+      window as Window & typeof globalThis & { webkitAudioContext?: typeof AudioContext }
+    ).webkitAudioContext;
+
+  if (!AudioContextCtor) {
+    throw new Error("Web Audio API is unavailable in this browser.");
+  }
+
+  const audioContext = new AudioContextCtor();
+
+  try {
+    const arrayBuffer = await blob.arrayBuffer();
+    const audioBuffer = await audioContext.decodeAudioData(arrayBuffer.slice(0));
+    // Use first channel for lightweight proxy metrics.
+    return new Float32Array(audioBuffer.getChannelData(0));
+  } finally {
+    await audioContext.close();
+  }
+}
+
+function computeProxyMetricsFromWaveforms(
+  noisyInput: Float32Array,
+  cleanInput: Float32Array,
+): Pick<DenoiseResponse, "before_metrics" | "after_metrics"> | undefined {
+  const noisy = downsampleForMetrics(noisyInput);
+  const clean = downsampleForMetrics(cleanInput);
+
+  const n = Math.min(noisy.length, clean.length);
+  if (n < 2) return undefined;
+
+  let sumErrorSq = 0;
+  let sumCleanSq = 0;
+  let peakClean = 0;
+  let sumNoisy = 0;
+  let sumClean = 0;
+  let sumLogDiffSq = 0;
+
+  for (let i = 0; i < n; i += 1) {
+    const noisyValue = noisy[i];
+    const cleanValue = clean[i];
+    const error = noisyValue - cleanValue;
+
+    sumErrorSq += error * error;
+    sumCleanSq += cleanValue * cleanValue;
+    peakClean = Math.max(peakClean, Math.abs(cleanValue));
+    sumNoisy += noisyValue;
+    sumClean += cleanValue;
+
+    const logClean = Math.log10(Math.max(Math.abs(cleanValue), EPSILON));
+    const logNoisy = Math.log10(Math.max(Math.abs(noisyValue), EPSILON));
+    const logDiff = logClean - logNoisy;
+    sumLogDiffSq += logDiff * logDiff;
+  }
+
+  const mse = sumErrorSq / n;
+  const refPower = sumCleanSq / n;
+  const peak = Math.max(peakClean, EPSILON);
+
+  const snr = 10 * Math.log10((refPower + EPSILON) / (mse + EPSILON));
+  const psnr = 10 * Math.log10((peak * peak + EPSILON) / (mse + EPSILON));
+  const lsd = Math.sqrt(sumLogDiffSq / n);
+
+  const muNoisy = sumNoisy / n;
+  const muClean = sumClean / n;
+
+  let varNoisy = 0;
+  let varClean = 0;
+  let covariance = 0;
+
+  for (let i = 0; i < n; i += 1) {
+    const noisyCentered = noisy[i] - muNoisy;
+    const cleanCentered = clean[i] - muClean;
+    varNoisy += noisyCentered * noisyCentered;
+    varClean += cleanCentered * cleanCentered;
+    covariance += noisyCentered * cleanCentered;
+  }
+
+  varNoisy /= n;
+  varClean /= n;
+  covariance /= n;
+
+  const c1 = 1e-4;
+  const c2 = 9e-4;
+  const ssimNumerator =
+    (2 * muClean * muNoisy + c1) * (2 * covariance + c2);
+  const ssimDenominator =
+    (muClean * muClean + muNoisy * muNoisy + c1) *
+    (varClean + varNoisy + c2);
+  const ssim =
+    ssimDenominator > 0
+      ? clamp(ssimNumerator / ssimDenominator, -1, 1)
+      : 1;
+
+  return {
+    before_metrics: {
+      snr: clamp(snr, -120, 120),
+      psnr: clamp(psnr, -120, 120),
+      ssim,
+      lsd: Math.max(0, lsd),
+    },
+    // Keep after values idealized, matching backend proxy semantics.
+    after_metrics: {
+      snr: 120,
+      psnr: 120,
+      ssim: 1,
+      lsd: 0,
+    },
+  };
+}
+
+async function computeProxyMetricsFromAudio(
+  originalFile: File,
+  denoisedBlob: Blob,
+): Promise<Pick<DenoiseResponse, "before_metrics" | "after_metrics"> | undefined> {
+  try {
+    const [noisy, clean] = await Promise.all([
+      decodeAudioToMono(originalFile),
+      decodeAudioToMono(denoisedBlob),
+    ]);
+    return computeProxyMetricsFromWaveforms(noisy, clean);
+  } catch (error) {
+    console.warn("Failed to compute client-side proxy metrics:", error);
+    return undefined;
+  }
+}
 
 function parseMetricGroupFromHeaders(
   xhr: XMLHttpRequest,
@@ -117,7 +307,7 @@ export async function denoiseAudio(
           const text = await (xhr.response as Blob).text();
           const parsed = JSON.parse(text) as DenoiseResponse;
           const headerMetrics = parseProxyMetricsFromHeaders(xhr);
-          const data: DenoiseResponse = {
+          let data: DenoiseResponse = {
             ...parsed,
             before_metrics: parsed.before_metrics ?? headerMetrics.before_metrics,
             after_metrics: parsed.after_metrics ?? headerMetrics.after_metrics,
@@ -125,6 +315,22 @@ export async function denoiseAudio(
           // Fetch the actual audio file
           const audioRes = await fetch(`${API_BASE}${data.denoised_audio_url}`);
           const audioBlob = await audioRes.blob();
+
+          if (!responseHasAnyMetrics(data)) {
+            const computedMetrics = await computeProxyMetricsFromAudio(
+              file,
+              audioBlob,
+            );
+            if (computedMetrics) {
+              data = {
+                ...data,
+                before_metrics:
+                  data.before_metrics ?? computedMetrics.before_metrics,
+                after_metrics: data.after_metrics ?? computedMetrics.after_metrics,
+              };
+            }
+          }
+
           const denoisedBlobUrl = URL.createObjectURL(audioBlob);
           resolve({ data, denoisedBlobUrl });
         } else {
@@ -135,7 +341,7 @@ export async function denoiseAudio(
           // Extract metadata from headers if present
           const processingTime = xhr.getResponseHeader("X-Processing-Time");
           const headerMetrics = parseProxyMetricsFromHeaders(xhr);
-          const data: DenoiseResponse = {
+          let data: DenoiseResponse = {
             denoised_audio_url: denoisedBlobUrl,
             original_filename: file.name,
             processing_time: processingTime
@@ -143,6 +349,17 @@ export async function denoiseAudio(
               : undefined,
             ...headerMetrics,
           };
+
+          if (!responseHasAnyMetrics(data)) {
+            const computedMetrics = await computeProxyMetricsFromAudio(file, blob);
+            if (computedMetrics) {
+              data = {
+                ...data,
+                ...computedMetrics,
+              };
+            }
+          }
+
           resolve({ data, denoisedBlobUrl });
         }
       } else {
