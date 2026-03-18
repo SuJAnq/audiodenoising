@@ -1254,6 +1254,12 @@ select {
   font-variant-numeric: tabular-nums;
 }
 
+.metrics-comparison__hint {
+  color: var(--text-tertiary);
+  font-size: var(--font-size-sm);
+  margin-top: 0.25rem;
+}
+
 .results-grid {
   display: grid;
   grid-template-columns: 1fr 1fr;

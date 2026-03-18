@@ -138,11 +138,11 @@ export default function HomePage({
       (metricsRecord?.denoised as DenoiseMetrics | undefined) ??
       flatAfter;
 
-    if (!hasAnyMetric(before) && !hasAnyMetric(after)) {
-      return null;
-    }
-
-    return { before, after };
+    return {
+      before,
+      after,
+      hasData: hasAnyMetric(before) || hasAnyMetric(after),
+    };
   }, [result]);
 
   return (
@@ -349,6 +349,13 @@ export default function HomePage({
                         </span>
                       </div>
                     </div>
+                  </div>
+                )}
+
+                {metricsComparison && !metricsComparison.hasData && (
+                  <div className="metrics-comparison__hint">
+                    Metrics are unavailable from the current backend response for
+                    this audio.
                   </div>
                 )}
               </div>
