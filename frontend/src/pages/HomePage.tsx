@@ -31,7 +31,7 @@ export default function HomePage({
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<DenoiseResponse | null>(null);
   const [denoisedUrl, setDenoisedUrl] = useState<string | null>(null);
-  const [isExtraInfoVisible, setIsExtraInfoVisible] = useState(true);
+  const [isExtraInfoVisible, setIsExtraInfoVisible] = useState(false);
 
   const originalUrl = useMemo(
     () => (file ? URL.createObjectURL(file) : null),
@@ -46,7 +46,7 @@ export default function HomePage({
   const handleFileSelect = useCallback((f: File) => {
     setResult(null);
     setDenoisedUrl(null);
-    setIsExtraInfoVisible(true);
+    setIsExtraInfoVisible(false);
     setError(null);
     setProgress(0);
     setState("idle");
@@ -57,7 +57,7 @@ export default function HomePage({
     setFile(null);
     setResult(null);
     setDenoisedUrl(null);
-    setIsExtraInfoVisible(true);
+    setIsExtraInfoVisible(false);
     setState("idle");
     setError(null);
   }, []);
@@ -94,7 +94,7 @@ export default function HomePage({
   /* Auto-scroll to results page after denoising completes */
   useEffect(() => {
     if (state === "done") {
-      setIsExtraInfoVisible(true);
+      setIsExtraInfoVisible(false);
       setTimeout(() => {
         document
           .getElementById("page-results")
