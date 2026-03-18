@@ -79,14 +79,14 @@ logger = logging.getLogger("denoiser")
 logging.basicConfig(level=logging.INFO)
 
 METRIC_HEADER_NAMES = [
-    "X-Metrics-Before-SNR",
-    "X-Metrics-Before-PSNR",
-    "X-Metrics-Before-SSIM",
-    "X-Metrics-Before-LSD",
-    "X-Metrics-After-SNR",
-    "X-Metrics-After-PSNR",
-    "X-Metrics-After-SSIM",
-    "X-Metrics-After-LSD",
+    "X-Metric-Before-SNR",
+    "X-Metric-Before-PSNR",
+    "X-Metric-Before-SSIM",
+    "X-Metric-Before-LSD",
+    "X-Metric-After-SNR",
+    "X-Metric-After-PSNR",
+    "X-Metric-After-SSIM",
+    "X-Metric-After-LSD",
 ]
 
 
