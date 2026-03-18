@@ -645,48 +645,62 @@ def _compute_proxy_metrics(
     mag_noisy: torch.Tensor,
     mag_clean: torch.Tensor,
 ) -> dict[str, dict[str, float]]:
-    """Compute before/after metrics for UI display without clean ground-truth.
+    """Compute bidirectional proxy metrics from noisy and denoised audio.
 
-    `before` compares noisy vs denoised (proxy quality gap).
-    `after` uses denoised-vs-denoised idealized reference.
+    `before` uses denoised audio as reference and evaluates noisy audio.
+    `after` uses noisy audio as reference and evaluates denoised audio.
     """
-    eps = 1e-8
 
-    noisy = waveform_noisy.detach().float().flatten()
-    clean = waveform_clean.detach().float().flatten()
-    n = min(noisy.numel(), clean.numel())
-    if n <= 1:
+    def _directional_metrics(
+        reference_waveform: torch.Tensor,
+        estimate_waveform: torch.Tensor,
+        reference_mag: torch.Tensor,
+        estimate_mag: torch.Tensor,
+    ) -> dict[str, float]:
+        eps = 1e-8
+
+        reference = reference_waveform.detach().float().flatten()
+        estimate = estimate_waveform.detach().float().flatten()
+        n = min(reference.numel(), estimate.numel())
+        if n <= 1:
+            return {"snr": 0.0, "psnr": 0.0, "ssim": 0.0, "lsd": 0.0}
+
+        reference = reference[:n]
+        estimate = estimate[:n]
+        error = reference - estimate
+
+        mse = float(torch.mean(error.pow(2)).item())
+        ref_power = float(torch.mean(reference.pow(2)).item())
+        peak = max(float(torch.max(reference.abs()).item()), eps)
+
+        snr = 10.0 * math.log10((ref_power + eps) / (mse + eps))
+        psnr = 10.0 * math.log10((peak * peak + eps) / (mse + eps))
+        ssim = _compute_ssim_1d(reference, estimate)
+        lsd = _compute_lsd(
+            reference_mag.detach().float(),
+            estimate_mag.detach().float(),
+        )
+
         return {
-            "before": {"snr": 0.0, "psnr": 0.0, "ssim": 0.0, "lsd": 0.0},
-            "after": {"snr": 120.0, "psnr": 120.0, "ssim": 1.0, "lsd": 0.0},
+            "snr": max(-120.0, min(120.0, snr)),
+            "psnr": max(-120.0, min(120.0, psnr)),
+            "ssim": max(-1.0, min(1.0, ssim)),
+            "lsd": max(0.0, lsd),
         }
 
-    noisy = noisy[:n]
-    clean = clean[:n]
-    error = noisy - clean
-
-    mse = float(torch.mean(error.pow(2)).item())
-    ref_power = float(torch.mean(clean.pow(2)).item())
-    peak = max(float(torch.max(clean.abs()).item()), 1e-8)
-
-    snr_before = 10.0 * math.log10((ref_power + eps) / (mse + eps))
-    psnr_before = 10.0 * math.log10((peak * peak + eps) / (mse + eps))
-    ssim_before = _compute_ssim_1d(clean, noisy)
-    lsd_before = _compute_lsd(mag_clean.detach().float(), mag_noisy.detach().float())
-
     return {
-        "before": {
-            "snr": max(-120.0, min(120.0, snr_before)),
-            "psnr": max(-120.0, min(120.0, psnr_before)),
-            "ssim": max(-1.0, min(1.0, ssim_before)),
-            "lsd": max(0.0, lsd_before),
-        },
-        "after": {
-            "snr": 120.0,
-            "psnr": 120.0,
-            "ssim": 1.0,
-            "lsd": 0.0,
-        },
+        "before": _directional_metrics(
+            waveform_clean,
+            waveform_noisy,
+            mag_clean,
+            mag_noisy,
+        ),
+        "after": _directional_metrics(
+            waveform_noisy,
+            waveform_clean,
+            mag_noisy,
+            mag_clean,
+        ),
     }
 
 

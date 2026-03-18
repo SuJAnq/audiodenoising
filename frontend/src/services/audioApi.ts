@@ -120,83 +120,89 @@ function computeProxyMetricsFromWaveforms(
   const n = Math.min(noisy.length, clean.length);
   if (n < 2) return undefined;
 
-  let sumErrorSq = 0;
-  let sumCleanSq = 0;
-  let peakClean = 0;
-  let sumNoisy = 0;
-  let sumClean = 0;
-  let sumLogDiffSq = 0;
+  const noisyTrimmed = noisy.subarray(0, n);
+  const cleanTrimmed = clean.subarray(0, n);
 
-  for (let i = 0; i < n; i += 1) {
-    const noisyValue = noisy[i];
-    const cleanValue = clean[i];
-    const error = noisyValue - cleanValue;
+  const directionalMetrics = (
+    reference: Float32Array,
+    estimate: Float32Array,
+  ): DenoiseMetrics => {
+    let sumErrorSq = 0;
+    let sumReferenceSq = 0;
+    let peakReference = 0;
+    let sumReference = 0;
+    let sumEstimate = 0;
+    let sumLogDiffSq = 0;
 
-    sumErrorSq += error * error;
-    sumCleanSq += cleanValue * cleanValue;
-    peakClean = Math.max(peakClean, Math.abs(cleanValue));
-    sumNoisy += noisyValue;
-    sumClean += cleanValue;
+    for (let i = 0; i < n; i += 1) {
+      const referenceValue = reference[i];
+      const estimateValue = estimate[i];
+      const error = referenceValue - estimateValue;
 
-    const logClean = Math.log10(Math.max(Math.abs(cleanValue), EPSILON));
-    const logNoisy = Math.log10(Math.max(Math.abs(noisyValue), EPSILON));
-    const logDiff = logClean - logNoisy;
-    sumLogDiffSq += logDiff * logDiff;
-  }
+      sumErrorSq += error * error;
+      sumReferenceSq += referenceValue * referenceValue;
+      peakReference = Math.max(peakReference, Math.abs(referenceValue));
+      sumReference += referenceValue;
+      sumEstimate += estimateValue;
 
-  const mse = sumErrorSq / n;
-  const refPower = sumCleanSq / n;
-  const peak = Math.max(peakClean, EPSILON);
+      const logReference = Math.log10(
+        Math.max(Math.abs(referenceValue), EPSILON),
+      );
+      const logEstimate = Math.log10(Math.max(Math.abs(estimateValue), EPSILON));
+      const logDiff = logReference - logEstimate;
+      sumLogDiffSq += logDiff * logDiff;
+    }
 
-  const snr = 10 * Math.log10((refPower + EPSILON) / (mse + EPSILON));
-  const psnr = 10 * Math.log10((peak * peak + EPSILON) / (mse + EPSILON));
-  const lsd = Math.sqrt(sumLogDiffSq / n);
+    const mse = sumErrorSq / n;
+    const referencePower = sumReferenceSq / n;
+    const peak = Math.max(peakReference, EPSILON);
 
-  const muNoisy = sumNoisy / n;
-  const muClean = sumClean / n;
+    const snr = 10 * Math.log10((referencePower + EPSILON) / (mse + EPSILON));
+    const psnr = 10 * Math.log10((peak * peak + EPSILON) / (mse + EPSILON));
+    const lsd = Math.sqrt(sumLogDiffSq / n);
 
-  let varNoisy = 0;
-  let varClean = 0;
-  let covariance = 0;
+    const muReference = sumReference / n;
+    const muEstimate = sumEstimate / n;
 
-  for (let i = 0; i < n; i += 1) {
-    const noisyCentered = noisy[i] - muNoisy;
-    const cleanCentered = clean[i] - muClean;
-    varNoisy += noisyCentered * noisyCentered;
-    varClean += cleanCentered * cleanCentered;
-    covariance += noisyCentered * cleanCentered;
-  }
+    let varReference = 0;
+    let varEstimate = 0;
+    let covariance = 0;
 
-  varNoisy /= n;
-  varClean /= n;
-  covariance /= n;
+    for (let i = 0; i < n; i += 1) {
+      const referenceCentered = reference[i] - muReference;
+      const estimateCentered = estimate[i] - muEstimate;
+      varReference += referenceCentered * referenceCentered;
+      varEstimate += estimateCentered * estimateCentered;
+      covariance += referenceCentered * estimateCentered;
+    }
 
-  const c1 = 1e-4;
-  const c2 = 9e-4;
-  const ssimNumerator =
-    (2 * muClean * muNoisy + c1) * (2 * covariance + c2);
-  const ssimDenominator =
-    (muClean * muClean + muNoisy * muNoisy + c1) *
-    (varClean + varNoisy + c2);
-  const ssim =
-    ssimDenominator > 0
-      ? clamp(ssimNumerator / ssimDenominator, -1, 1)
-      : 1;
+    varReference /= n;
+    varEstimate /= n;
+    covariance /= n;
 
-  return {
-    before_metrics: {
+    const c1 = 1e-4;
+    const c2 = 9e-4;
+    const ssimNumerator =
+      (2 * muReference * muEstimate + c1) * (2 * covariance + c2);
+    const ssimDenominator =
+      (muReference * muReference + muEstimate * muEstimate + c1) *
+      (varReference + varEstimate + c2);
+    const ssim =
+      ssimDenominator > 0
+        ? clamp(ssimNumerator / ssimDenominator, -1, 1)
+        : 1;
+
+    return {
       snr: clamp(snr, -120, 120),
       psnr: clamp(psnr, -120, 120),
       ssim,
       lsd: Math.max(0, lsd),
-    },
-    // Keep after values idealized, matching backend proxy semantics.
-    after_metrics: {
-      snr: 120,
-      psnr: 120,
-      ssim: 1,
-      lsd: 0,
-    },
+    };
+  };
+
+  return {
+    before_metrics: directionalMetrics(cleanTrimmed, noisyTrimmed),
+    after_metrics: directionalMetrics(noisyTrimmed, cleanTrimmed),
   };
 }
 
