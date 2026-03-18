@@ -3,7 +3,22 @@ import AudioUploader from "../components/AudioUploader";
 import WaveformVisualizer from "../components/WaveformVisualizer";
 import SpectrogramVisualizer from "../components/SpectrogramVisualizer";
 import { denoiseAudio } from "../services/audioApi";
-import type { DenoiseResponse, ProcessingState } from "../types/audio";
+import type {
+  DenoiseMetrics,
+  DenoiseResponse,
+  ProcessingState,
+} from "../types/audio";
+
+const hasAnyMetric = (metrics?: DenoiseMetrics): boolean =>
+  metrics?.snr != null ||
+  metrics?.psnr != null ||
+  metrics?.ssim != null ||
+  metrics?.lsd != null;
+
+const formatMetric = (value: number | undefined, digits: number): string =>
+  typeof value === "number" && Number.isFinite(value)
+    ? value.toFixed(digits)
+    : "—";
 
 export default function HomePage({
   onDenoiseComplete,
@@ -89,6 +104,46 @@ export default function HomePage({
   }, [state]);
 
   const isProcessing = state === "uploading" || state === "processing";
+
+  const metricsComparison = useMemo(() => {
+    if (!result) return null;
+
+    const metricsRaw = result.metrics;
+    const metricsRecord =
+      metricsRaw && typeof metricsRaw === "object"
+        ? (metricsRaw as Record<string, unknown>)
+        : null;
+
+    const flatAfter =
+      metricsRecord &&
+      ("snr" in metricsRecord ||
+        "psnr" in metricsRecord ||
+        "ssim" in metricsRecord ||
+        "lsd" in metricsRecord)
+        ? (metricsRaw as DenoiseMetrics)
+        : undefined;
+
+    const before =
+      result.before_metrics ??
+      result.metrics_before ??
+      result.noisy_metrics ??
+      (metricsRecord?.before as DenoiseMetrics | undefined) ??
+      (metricsRecord?.noisy as DenoiseMetrics | undefined);
+
+    const after =
+      result.after_metrics ??
+      result.metrics_after ??
+      result.denoised_metrics ??
+      (metricsRecord?.after as DenoiseMetrics | undefined) ??
+      (metricsRecord?.denoised as DenoiseMetrics | undefined) ??
+      flatAfter;
+
+    if (!hasAnyMetric(before) && !hasAnyMetric(after)) {
+      return null;
+    }
+
+    return { before, after };
+  }, [result]);
 
   return (
     <>
@@ -205,7 +260,7 @@ export default function HomePage({
                 onClick={() => setIsExtraInfoVisible((visible) => !visible)}
               >
                 <span>
-                  {isExtraInfoVisible ? "Hide metrics" : "Show metrics"}
+                  {isExtraInfoVisible ? "Hide extra info" : "Show extra info"}
                 </span>
                 <svg
                   className="results-toggle__icon"
@@ -233,40 +288,67 @@ export default function HomePage({
                   .join(" ")}
                 aria-hidden={!isExtraInfoVisible}
               >
-                {result?.metrics && (
-                  <div className="metrics">
-                    {result.metrics.snr != null && (
-                      <div className="metric">
-                        <div className="metric__value">
-                          {result.metrics.snr.toFixed(2)}
-                        </div>
-                        <div className="metric__label">SNR (dB)</div>
+                {metricsComparison && (
+                  <div className="metrics-comparison">
+                    <div className="metrics-comparison__column">
+                      <div className="metrics-comparison__title">
+                        Before Denoising
                       </div>
-                    )}
-                    {result.metrics.psnr != null && (
-                      <div className="metric">
-                        <div className="metric__value">
-                          {result.metrics.psnr.toFixed(2)}
-                        </div>
-                        <div className="metric__label">PSNR</div>
+                      <div className="metrics-comparison__row">
+                        <span className="metrics-comparison__label">SNR (dB)</span>
+                        <span className="metrics-comparison__value">
+                          {formatMetric(metricsComparison.before?.snr, 2)}
+                        </span>
                       </div>
-                    )}
-                    {result.metrics.ssim != null && (
-                      <div className="metric">
-                        <div className="metric__value">
-                          {result.metrics.ssim.toFixed(4)}
-                        </div>
-                        <div className="metric__label">SSIM</div>
+                      <div className="metrics-comparison__row">
+                        <span className="metrics-comparison__label">PSNR</span>
+                        <span className="metrics-comparison__value">
+                          {formatMetric(metricsComparison.before?.psnr, 2)}
+                        </span>
                       </div>
-                    )}
-                    {result.metrics.lsd != null && (
-                      <div className="metric">
-                        <div className="metric__value">
-                          {result.metrics.lsd.toFixed(3)}
-                        </div>
-                        <div className="metric__label">LSD</div>
+                      <div className="metrics-comparison__row">
+                        <span className="metrics-comparison__label">SSIM</span>
+                        <span className="metrics-comparison__value">
+                          {formatMetric(metricsComparison.before?.ssim, 4)}
+                        </span>
                       </div>
-                    )}
+                      <div className="metrics-comparison__row">
+                        <span className="metrics-comparison__label">LSD</span>
+                        <span className="metrics-comparison__value">
+                          {formatMetric(metricsComparison.before?.lsd, 3)}
+                        </span>
+                      </div>
+                    </div>
+
+                    <div className="metrics-comparison__column">
+                      <div className="metrics-comparison__title">
+                        After Denoising
+                      </div>
+                      <div className="metrics-comparison__row">
+                        <span className="metrics-comparison__label">SNR (dB)</span>
+                        <span className="metrics-comparison__value">
+                          {formatMetric(metricsComparison.after?.snr, 2)}
+                        </span>
+                      </div>
+                      <div className="metrics-comparison__row">
+                        <span className="metrics-comparison__label">PSNR</span>
+                        <span className="metrics-comparison__value">
+                          {formatMetric(metricsComparison.after?.psnr, 2)}
+                        </span>
+                      </div>
+                      <div className="metrics-comparison__row">
+                        <span className="metrics-comparison__label">SSIM</span>
+                        <span className="metrics-comparison__value">
+                          {formatMetric(metricsComparison.after?.ssim, 4)}
+                        </span>
+                      </div>
+                      <div className="metrics-comparison__row">
+                        <span className="metrics-comparison__label">LSD</span>
+                        <span className="metrics-comparison__value">
+                          {formatMetric(metricsComparison.after?.lsd, 3)}
+                        </span>
+                      </div>
+                    </div>
                   </div>
                 )}
               </div>

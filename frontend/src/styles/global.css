@@ -1211,6 +1211,49 @@ select {
   transform: translateY(0);
 }
 
+.metrics-comparison {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 1.25rem;
+  background: var(--bg-card);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-md);
+  padding: 1rem 1.1rem;
+}
+
+.metrics-comparison__column {
+  display: grid;
+  gap: 0.55rem;
+}
+
+.metrics-comparison__title {
+  color: var(--text-tertiary);
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  font-weight: 600;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  margin-bottom: 0.2rem;
+}
+
+.metrics-comparison__row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.8rem;
+}
+
+.metrics-comparison__label {
+  color: var(--text-secondary);
+  font-size: var(--font-size-base);
+}
+
+.metrics-comparison__value {
+  color: var(--text-primary);
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
 .results-grid {
   display: grid;
   grid-template-columns: 1fr 1fr;
@@ -1520,6 +1563,11 @@ select {
   .results-toggle {
     padding: 0.85rem 1rem;
     font-size: var(--font-size-sm);
+  }
+
+  .metrics-comparison {
+    grid-template-columns: 1fr;
+    gap: 1rem;
   }
 
   .fullpage__section {

@@ -6,7 +6,14 @@ export interface DenoiseResponse {
   /** Original filename */
   original_filename: string;
   /** Optional metrics returned by the model */
-  metrics?: DenoiseMetrics;
+  metrics?: DenoiseMetrics | DenoiseMetricsGroup;
+  /** Optional alternate metric fields used by some backend versions */
+  before_metrics?: DenoiseMetrics;
+  after_metrics?: DenoiseMetrics;
+  noisy_metrics?: DenoiseMetrics;
+  denoised_metrics?: DenoiseMetrics;
+  metrics_before?: DenoiseMetrics;
+  metrics_after?: DenoiseMetrics;
   /** Processing time in seconds */
   processing_time?: number;
 }
@@ -16,6 +23,13 @@ export interface DenoiseMetrics {
   psnr?: number;
   ssim?: number;
   lsd?: number;
+}
+
+export interface DenoiseMetricsGroup {
+  before?: DenoiseMetrics;
+  after?: DenoiseMetrics;
+  noisy?: DenoiseMetrics;
+  denoised?: DenoiseMetrics;
 }
 
 export interface HealthStatus {
