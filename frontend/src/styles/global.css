@@ -1459,6 +1459,16 @@ select {
   border-color: rgba(255, 69, 58, 0.2);
 }
 
+.backend-status--warming .backend-status__dot {
+  background: #f59e0b;
+  box-shadow: 0 0 6px rgba(245, 158, 11, 0.45);
+}
+
+.backend-status--warming {
+  color: #f59e0b;
+  border-color: rgba(245, 158, 11, 0.22);
+}
+
 /* ---------- Animated Background Grain ---------- */
 .grain {
   position: fixed;

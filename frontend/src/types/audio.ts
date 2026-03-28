@@ -33,8 +33,9 @@ export interface DenoiseMetricsGroup {
 }
 
 export interface HealthStatus {
-  status: "ok" | "error";
+  status: "ok" | "error" | "warming";
   model_loaded: boolean;
+  model_load_error?: string | null;
   version?: string;
 }
 

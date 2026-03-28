@@ -269,12 +269,25 @@ class ApiError extends Error {
 export async function checkHealth(): Promise<HealthStatus> {
   try {
     const res = await fetch(`${API_BASE}/health`, {
-      signal: AbortSignal.timeout(5000),
+      signal: AbortSignal.timeout(20000),
     });
-    if (!res.ok) return { status: "error", model_loaded: false };
-    return await res.json();
+    if (!res.ok) {
+      // HF Spaces often return 5xx while waking/building.
+      if (res.status >= 500) return { status: "warming", model_loaded: false };
+      return { status: "error", model_loaded: false };
+    }
+
+    const data = (await res.json()) as HealthStatus;
+    if (data.status === "ok") return data;
+
+    // Model not loaded yet: treat as warming unless explicit load error is exposed.
+    if (data.model_load_error) {
+      return { ...data, status: "error" };
+    }
+    return { ...data, status: "warming" };
   } catch {
-    return { status: "error", model_loaded: false };
+    // Network timeouts are common during Space cold starts.
+    return { status: "warming", model_loaded: false };
   }
 }
 

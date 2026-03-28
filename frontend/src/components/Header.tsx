@@ -5,16 +5,38 @@ import { checkHealth } from "../services/audioApi";
  * Small badge showing whether the backend API is reachable.
  */
 export function BackendStatus() {
-  const [online, setOnline] = useState<boolean | null>(null);
+  const [status, setStatus] = useState<"checking" | "online" | "warming" | "offline">("checking");
+  const [consecutiveErrors, setConsecutiveErrors] = useState(0);
 
   useEffect(() => {
     let cancelled = false;
     const check = async () => {
       const health = await checkHealth();
-      if (!cancelled) setOnline(health.status === "ok");
+
+      if (cancelled) return;
+
+      if (health.status === "ok") {
+        setConsecutiveErrors(0);
+        setStatus("online");
+        return;
+      }
+
+      if (health.status === "warming") {
+        setConsecutiveErrors((prev) => prev + 1);
+        setStatus("warming");
+        return;
+      }
+
+      setConsecutiveErrors((prev) => {
+        const next = prev + 1;
+        // Avoid flashing Offline during short startup/network blips.
+        setStatus(next >= 3 ? "offline" : "warming");
+        return next;
+      });
     };
+
     check();
-    const interval = setInterval(check, 30_000);
+    const interval = setInterval(check, 20_000);
     return () => {
       cancelled = true;
       clearInterval(interval);
@@ -22,14 +44,22 @@ export function BackendStatus() {
   }, []);
 
   const cls =
-    online === null
-      ? "backend-status"
-      : online
-        ? "backend-status backend-status--online"
-        : "backend-status backend-status--offline";
+    status === "online"
+      ? "backend-status backend-status--online"
+      : status === "offline"
+        ? "backend-status backend-status--offline"
+        : status === "warming"
+          ? "backend-status backend-status--warming"
+          : "backend-status";
 
   const label =
-    online === null ? "Checking…" : online ? "API Online" : "API Offline";
+    status === "online"
+      ? "API Online"
+      : status === "offline"
+        ? "API Offline"
+        : status === "warming"
+          ? "Waking API…"
+          : "Checking…";
 
   return (
     <span className={cls}>
