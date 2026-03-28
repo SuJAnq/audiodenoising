@@ -172,6 +172,7 @@ def _pick_checkpoint_from_dir(directory: Path) -> Path | None:
 
 # ── Globals ──
 _model: UNet | None = None
+_model_load_error: str | None = None
 _device: torch.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 CHECKPOINT_DIR = Path(os.getenv("CHECKPOINT_DIR", str(PROJECT_ROOT / "checkpoints"))).expanduser()
 FALLBACK_CHECKPOINT_DIR = PROJECT_ROOT / "backend" / "models"
@@ -800,10 +801,18 @@ def _load_model() -> UNet | None:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Load model on startup, cleanup on shutdown."""
-    global _model
-    _model = _load_model()
+    global _model, _model_load_error
+    try:
+        _model = _load_model()
+        _model_load_error = None
+    except Exception as exc:
+        # Keep API process alive so /api/health can report startup problems.
+        logger.exception("Model failed to load during startup")
+        _model = None
+        _model_load_error = str(exc)
     yield
     _model = None
+    _model_load_error = None
 
 
 # ── FastAPI App ──
@@ -836,6 +845,7 @@ async def health():
     return {
         "status": "ok" if _model is not None else "error",
         "model_loaded": _model is not None,
+        "model_load_error": _model_load_error,
         "device": str(_device),
         "use_griffin_lim": USE_GRIFFIN_LIM,
         "griffin_lim_iter": GRIFFIN_LIM_ITER,
